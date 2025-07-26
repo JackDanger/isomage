@@ -3,6 +3,14 @@ name = "isomage"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "isomage"
+path = "src/main.rs"
+
+[lib]
+name = "isomage"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
 byteorder = "1.4"

@@ -1,12 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::fs::File;
-
-mod iso9660;
-mod ext2;
-mod tree;
-
-use tree::TreeNode;
+use isomage::{detect_and_parse_filesystem, TreeNode};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -30,20 +25,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<TreeNode> {
-    // Try ISO 9660 first (most common for .iso files)
-    if let Ok(root) = iso9660::parse_iso9660(file) {
-        return Ok(root);
-    }
-    
-    // Try ext2/3/4 (common for .img files)
-    if let Ok(root) = ext2::parse_ext2(file) {
-        return Ok(root);
-    }
-    
-    // If no filesystem detected, return error
-    anyhow::bail!("Unable to detect supported filesystem in {}", filename);
-}
 
 fn print_tree(node: &TreeNode, depth: usize) {
     let indent = "  ".repeat(depth);
