@@ -1,0 +1,75 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+
+mod iso9660;
+mod ext2;
+mod tree;
+
+use tree::TreeNode;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the .img or .iso file
+    file: String,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    
+    let mut file = File::open(&args.file)
+        .with_context(|| format!("Failed to open file: {}", args.file))?;
+    
+    // Detect filesystem type and parse accordingly
+    let root_node = detect_and_parse_filesystem(&mut file, &args.file)?;
+    
+    // Print the tree structure
+    print_tree(&root_node, 0);
+    
+    Ok(())
+}
+
+fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<TreeNode> {
+    // Try ISO 9660 first (most common for .iso files)
+    if let Ok(root) = iso9660::parse_iso9660(file) {
+        return Ok(root);
+    }
+    
+    // Try ext2/3/4 (common for .img files)
+    if let Ok(root) = ext2::parse_ext2(file) {
+        return Ok(root);
+    }
+    
+    // If no filesystem detected, return error
+    anyhow::bail!("Unable to detect supported filesystem in {}", filename);
+}
+
+fn print_tree(node: &TreeNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let prefix = if node.is_directory { "📁 " } else { "📄 " };
+    println!("{}{}{} ({})", indent, prefix, node.name, format_size(node.size));
+    
+    for child in &node.children {
+        print_tree(child, depth + 1);
+    }
+}
+
+fn format_size(size: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = size as f64;
+    let mut unit_idx = 0;
+    
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+    
+    if unit_idx == 0 {
+        format!("{} {}", size as u64, UNITS[unit_idx])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit_idx])
+    }
+}
