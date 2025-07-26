@@ -1,28 +1,36 @@
-use anyhow::{Context, Result};
-use clap::Parser;
+use std::env;
 use std::fs::File;
 use isomage::{detect_and_parse_filesystem, TreeNode};
 
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Path to the .img or .iso file
-    file: String,
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
+fn main() {
+    let args: Vec<String> = env::args().collect();
     
-    let mut file = File::open(&args.file)
-        .with_context(|| format!("Failed to open file: {}", args.file))?;
+    if args.len() != 2 {
+        eprintln!("Usage: {} <file.iso|file.img>", args[0]);
+        eprintln!("Parses and displays the directory structure of ISO 9660 or ext2/3/4 filesystems.");
+        std::process::exit(1);
+    }
+    
+    let filename = &args[1];
+    let mut file = match File::open(filename) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open file '{}': {}", filename, e);
+            std::process::exit(1);
+        }
+    };
     
     // Detect filesystem type and parse accordingly
-    let root_node = detect_and_parse_filesystem(&mut file, &args.file)?;
+    let root_node = match detect_and_parse_filesystem(&mut file, filename) {
+        Ok(node) => node,
+        Err(e) => {
+            eprintln!("Failed to parse filesystem: {}", e);
+            std::process::exit(1);
+        }
+    };
     
     // Print the tree structure
     print_tree(&root_node, 0);
-    
-    Ok(())
 }
 
 

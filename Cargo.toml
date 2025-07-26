@@ -12,6 +12,9 @@ name = "isomage"
 path = "src/lib.rs"
 
 [dependencies]
-clap = { version = "4.0", features = ["derive"] }
 byteorder = "1.4"
-anyhow = "1.0"
+
+[profile.release]
+opt-level = 1
+lto = false
+codegen-units = 16

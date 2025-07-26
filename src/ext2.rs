@@ -1,4 +1,4 @@
-use anyhow::Result;
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use crate::tree::TreeNode;
@@ -21,7 +21,7 @@ pub fn parse_ext2(file: &mut File) -> Result<TreeNode> {
     
     let magic = u16::from_le_bytes([buffer[56], buffer[57]]);
     if magic != EXT2_SUPER_MAGIC {
-        anyhow::bail!("Not a valid ext2/3/4 filesystem");
+        return Err("Not a valid ext2/3/4 filesystem".into());
     }
     
     let superblock = parse_superblock(&buffer)?;

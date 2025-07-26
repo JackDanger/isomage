@@ -4,10 +4,9 @@ pub mod tree;
 
 pub use tree::TreeNode;
 
-use anyhow::Result;
 use std::fs::File;
 
-pub fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<TreeNode> {
+pub fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<TreeNode, Box<dyn std::error::Error>> {
     if let Ok(root) = iso9660::parse_iso9660(file) {
         return Ok(root);
     }
@@ -16,7 +15,7 @@ pub fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<Tr
         return Ok(root);
     }
     
-    anyhow::bail!("Unable to detect supported filesystem in {}", filename);
+    Err(format!("Unable to detect supported filesystem in {}", filename).into())
 }
 
 #[cfg(test)]
@@ -37,7 +36,7 @@ mod tests {
             let path = test_file_path(test_file);
             if Path::new(&path).exists() {
                 let mut file = File::open(&path)
-                    .expect(&format!("Failed to open test file: {}", path));
+                    .unwrap_or_else(|_| panic!("Failed to open test file: {}", path));
                 
                 match iso9660::parse_iso9660(&mut file) {
                     Ok(root_node) => {
@@ -62,7 +61,7 @@ mod tests {
         
         if Path::new(&path).exists() {
             let mut file = File::open(&path)
-                .expect(&format!("Failed to open test file: {}", path));
+                .unwrap_or_else(|_| panic!("Failed to open test file: {}", path));
             
             match ext2::parse_ext2(&mut file) {
                 Ok(root_node) => {
@@ -92,7 +91,7 @@ mod tests {
             let path = test_file_path(test_file);
             if Path::new(&path).exists() {
                 let mut file = File::open(&path)
-                    .expect(&format!("Failed to open test file: {}", path));
+                    .unwrap_or_else(|_| panic!("Failed to open test file: {}", path));
                 
                 match detect_and_parse_filesystem(&mut file, test_file) {
                     Ok(root_node) => {
@@ -117,7 +116,7 @@ mod tests {
         
         if Path::new(&path).exists() {
             let mut file = File::open(&path)
-                .expect(&format!("Failed to open test file: {}", path));
+                .unwrap_or_else(|_| panic!("Failed to open test file: {}", path));
             
             if let Ok(root_node) = detect_and_parse_filesystem(&mut file, test_file) {
                 validate_tree_structure(&root_node, 0);
@@ -146,10 +145,7 @@ mod tests {
     fn test_invalid_file_handling() {
         let invalid_path = test_file_path("nonexistent.iso");
         
-        match File::open(&invalid_path) {
-            Ok(_) => panic!("Should not be able to open nonexistent file"),
-            Err(_) => println!("Correctly handled nonexistent file"),
-        }
+        assert!(File::open(&invalid_path).is_err(), "Should not be able to open nonexistent file");
     }
 
     #[test]

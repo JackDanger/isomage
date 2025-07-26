@@ -1,4 +1,4 @@
-use anyhow::Result;
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use crate::tree::TreeNode;
@@ -24,7 +24,7 @@ pub fn parse_iso9660(file: &mut File) -> Result<TreeNode> {
     
     // Check for ISO 9660 signature
     if &buffer[1..6] != b"CD001" {
-        anyhow::bail!("Not a valid ISO 9660 filesystem");
+        return Err("Not a valid ISO 9660 filesystem".into());
     }
     
     // Parse root directory record (starts at offset 156)
@@ -40,12 +40,12 @@ pub fn parse_iso9660(file: &mut File) -> Result<TreeNode> {
 
 fn parse_directory_record(data: &[u8]) -> Result<DirectoryRecord> {
     if data.len() < 33 {
-        anyhow::bail!("Directory record too short");
+        return Err("Directory record too short".into());
     }
     
     let length = data[0];
     if length == 0 {
-        anyhow::bail!("Zero-length directory record");
+        return Err("Zero-length directory record".into());
     }
     
     let extent_location = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
