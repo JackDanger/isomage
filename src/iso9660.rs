@@ -1,5 +1,4 @@
-use anyhow::{Context, Result};
-use byteorder::{LittleEndian, ReadBytesExt};
+use anyhow::Result;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use crate::tree::TreeNode;
@@ -7,14 +6,9 @@ use crate::tree::TreeNode;
 const SECTOR_SIZE: u64 = 2048;
 const PRIMARY_VOLUME_DESCRIPTOR_SECTOR: u64 = 16;
 
-#[derive(Debug)]
-pub struct PrimaryVolumeDescriptor {
-    pub root_directory_record: DirectoryRecord,
-}
 
 #[derive(Debug, Clone)]
 pub struct DirectoryRecord {
-    pub length: u8,
     pub extent_location: u32,
     pub data_length: u32,
     pub is_directory: bool,
@@ -75,7 +69,6 @@ fn parse_directory_record(data: &[u8]) -> Result<DirectoryRecord> {
     };
     
     Ok(DirectoryRecord {
-        length,
         extent_location,
         data_length,
         is_directory,

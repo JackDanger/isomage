@@ -5,22 +5,12 @@ use crate::tree::TreeNode;
 
 const EXT2_SUPER_MAGIC: u16 = 0xEF53;
 const EXT2_SUPERBLOCK_OFFSET: u64 = 1024;
-const EXT2_ROOT_INODE: u32 = 2;
 
 #[derive(Debug)]
 struct Superblock {
     block_size: u32,
-    inodes_per_group: u32,
-    inode_size: u16,
-    desc_size: u16,
 }
 
-#[derive(Debug)]
-struct Inode {
-    mode: u16,
-    size: u32,
-    blocks: [u32; 15],
-}
 
 pub fn parse_ext2(file: &mut File) -> Result<TreeNode> {
     // Read superblock
@@ -52,19 +42,9 @@ pub fn parse_ext2(file: &mut File) -> Result<TreeNode> {
 fn parse_superblock(data: &[u8]) -> Result<Superblock> {
     let log_block_size = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
     let block_size = 1024 << log_block_size;
-    let inodes_per_group = u32::from_le_bytes([data[40], data[41], data[42], data[43]]);
-    let inode_size = u16::from_le_bytes([data[88], data[89]]);
-    let desc_size = if data.len() > 254 { 
-        u16::from_le_bytes([data[254], data[255]]) 
-    } else { 
-        0 
-    };
     
     Ok(Superblock {
         block_size,
-        inodes_per_group,
-        inode_size: if inode_size == 0 { 128 } else { inode_size },
-        desc_size: if desc_size == 0 { 32 } else { desc_size },
     })
 }
 
