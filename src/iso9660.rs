@@ -62,10 +62,14 @@ fn parse_directory_record(data: &[u8]) -> Result<DirectoryRecord> {
     } else if filename_length == 1 && data[33] == 1 {
         "..".to_string()
     } else {
-        String::from_utf8_lossy(&data[33..33 + filename_length])
-            .trim_end_matches(';')
-            .trim_end_matches('1')
-            .to_lowercase()
+        let raw_name = String::from_utf8_lossy(&data[33..33 + filename_length]);
+        // Remove ISO 9660 version suffix (;1, ;2, etc.) and trailing periods
+        let cleaned_name = if let Some(semicolon_pos) = raw_name.find(';') {
+            &raw_name[..semicolon_pos]
+        } else {
+            &raw_name
+        };
+        cleaned_name.trim_end_matches('.').to_lowercase()
     };
     
     Ok(DirectoryRecord {
