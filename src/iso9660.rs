@@ -108,7 +108,12 @@ fn parse_directory(file: &mut File, dir_record: &DirectoryRecord, parent_node: &
                     parse_directory(file, &record, &mut dir_node)?;
                     parent_node.add_child(dir_node);
                 } else {
-                    let file_node = TreeNode::new_file(record.filename.clone(), record.data_length as u64);
+                    let file_node = TreeNode::new_file_with_location(
+                        record.filename.clone(), 
+                        record.data_length as u64,
+                        record.extent_location as u64 * SECTOR_SIZE,
+                        record.data_length as u64
+                    );
                     parent_node.add_child(file_node);
                 }
             }

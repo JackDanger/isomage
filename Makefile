@@ -55,7 +55,7 @@ info: $(RELEASE_DIR)
 	@ls -la $(RELEASE_DIR)/ 2>/dev/null || echo "No release binaries found. Run 'make all' to build them."
 
 # Test data generation
-test-data: test_data/test_linux.iso test_data/test_macos.iso test_data/test_filesystem.img
+test-data: test_data/test_linux.iso test_data/test_macos.iso
 
 # Create test_linux.iso
 test_data/test_linux.iso: 
@@ -73,7 +73,8 @@ test_data/test_linux.iso:
 	@echo "System started" > test_data/linux_source/var/log/system.log
 	@chmod +x test_data/linux_source/usr/bin/hello
 	mkisofs -r -J -o test_data/test_linux.iso test_data/linux_source 2>/dev/null || \
-		hdiutil makehybrid -iso -joliet -o test_data/test_linux test_data/linux_source && mv test_data/test_linux.iso test_data/test_linux.iso
+		(hdiutil makehybrid -iso -joliet -o test_data/test_linux test_data/linux_source && mv test_data/test_linux.iso test_data/test_linux.iso) 2>/dev/null || \
+		genisoimage -r -J -o test_data/test_linux.iso test_data/linux_source
 	@echo "test_linux.iso created successfully"
 
 # Create test_macos.iso  
@@ -88,29 +89,13 @@ test_data/test_macos.iso:
 	@echo "Application Data" > test_data/macos_source/Applications/readme.txt
 	@echo "macOS system log" > test_data/macos_source/private/var/log/system.log
 	mkisofs -r -J -o test_data/test_macos.iso test_data/macos_source 2>/dev/null || \
-		hdiutil makehybrid -iso -joliet -o test_data/test_macos test_data/macos_source && mv test_data/test_macos.iso test_data/test_macos.iso
+		(hdiutil makehybrid -iso -joliet -o test_data/test_macos test_data/macos_source && mv test_data/test_macos.iso test_data/test_macos.iso) 2>/dev/null || \
+		genisoimage -r -J -o test_data/test_macos.iso test_data/macos_source
 	@echo "test_macos.iso created successfully"
 
-# Create test_filesystem.img (ext2)
-test_data/test_filesystem.img:
-	@echo "Creating test_filesystem.img..."
-	@mkdir -p test_data/ext2_source/test
-	@echo "This is a test README file for ext2 filesystem testing." > test_data/ext2_source/readme.txt
-	@echo "Test directory content" > test_data/ext2_source/test/sample.txt
-	dd if=/dev/zero of=test_data/test_filesystem.img bs=1M count=1 2>/dev/null
-	mkfs.ext2 -F test_data/test_filesystem.img >/dev/null 2>&1
-	@mkdir -p test_data/ext2_mount
-	@echo "Mounting and copying files to ext2 filesystem..."
-	sudo mount -o loop test_data/test_filesystem.img test_data/ext2_mount 2>/dev/null || \
-		(hdiutil attach -mountpoint test_data/ext2_mount test_data/test_filesystem.img 2>/dev/null && sleep 1)
-	sudo cp -r test_data/ext2_source/* test_data/ext2_mount/ 2>/dev/null || \
-		cp -r test_data/ext2_source/* test_data/ext2_mount/ 2>/dev/null
-	sudo umount test_data/ext2_mount 2>/dev/null || hdiutil detach test_data/ext2_mount 2>/dev/null
-	@rmdir test_data/ext2_mount 2>/dev/null || true
-	@echo "test_filesystem.img created successfully"
 
 # Clean test data
 clean-test-data:
-	rm -rf test_data/linux_source test_data/macos_source test_data/ext2_source test_data/ext2_mount
-	rm -f test_data/test_linux.iso test_data/test_macos.iso test_data/test_filesystem.img
+	rm -rf test_data/linux_source test_data/macos_source
+	rm -f test_data/test_linux.iso test_data/test_macos.iso
 

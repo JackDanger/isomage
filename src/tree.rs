@@ -4,6 +4,8 @@ pub struct TreeNode {
     pub size: u64,
     pub is_directory: bool,
     pub children: Vec<TreeNode>,
+    pub file_location: Option<u64>,
+    pub file_length: Option<u64>,
 }
 
 impl TreeNode {
@@ -13,6 +15,19 @@ impl TreeNode {
             size,
             is_directory: false,
             children: Vec::new(),
+            file_location: None,
+            file_length: None,
+        }
+    }
+    
+    pub fn new_file_with_location(name: String, size: u64, location: u64, length: u64) -> Self {
+        Self {
+            name,
+            size,
+            is_directory: false,
+            children: Vec::new(),
+            file_location: Some(location),
+            file_length: Some(length),
         }
     }
     
@@ -22,6 +37,8 @@ impl TreeNode {
             size: 0,
             is_directory: true,
             children: Vec::new(),
+            file_location: None,
+            file_length: None,
         }
     }
     
@@ -38,5 +55,33 @@ impl TreeNode {
             }
             self.size = total_size;
         }
+    }
+    
+    pub fn find_node(&self, path: &str) -> Option<&TreeNode> {
+        let path = path.trim_start_matches('/');
+        if path.is_empty() {
+            return Some(self);
+        }
+        
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() == 1 && parts[0] == self.name {
+            return Some(self);
+        }
+        
+        if parts.len() > 0 {
+            let first_part = parts[0];
+            for child in &self.children {
+                if child.name == first_part {
+                    if parts.len() == 1 {
+                        return Some(child);
+                    } else {
+                        let remaining_path = parts[1..].join("/");
+                        return child.find_node(&remaining_path);
+                    }
+                }
+            }
+        }
+        
+        None
     }
 }
