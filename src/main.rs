@@ -1,22 +1,114 @@
 use std::env;
 use std::fs::File;
-use isomage::{detect_and_parse_filesystem, extract_node, TreeNode};
+use isomage::{detect_and_parse_filesystem_verbose, extract_node, TreeNode};
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn print_help(program: &str) {
+    println!("isomage v{} - ISO/UDF filesystem browser and extractor", VERSION);
+    println!();
+    println!("USAGE:");
+    println!("    {} [OPTIONS] <file.iso>", program);
+    println!();
+    println!("OPTIONS:");
+    println!("    -h, --help       Show this help message");
+    println!("    -v, --verbose    Show detailed parsing information");
+    println!("    -x <PATH>        Extract file or directory at PATH");
+    println!("    -o <DIR>         Output directory for extraction (default: current directory)");
+    println!();
+    println!("EXAMPLES:");
+    println!("    # List contents of an ISO file");
+    println!("    {} movie.iso", program);
+    println!();
+    println!("    # List with verbose parsing info");
+    println!("    {} -v movie.iso", program);
+    println!();
+    println!("    # Extract the entire disc to current directory");
+    println!("    {} -x / movie.iso", program);
+    println!();
+    println!("    # Extract a specific directory");
+    println!("    {} -x BDMV/STREAM movie.iso", program);
+    println!();
+    println!("    # Extract a specific file");
+    println!("    {} -x BDMV/STREAM/00000.m2ts movie.iso", program);
+    println!();
+    println!("    # Extract to a specific output directory");
+    println!("    {} -x BDMV -o ./output movie.iso", program);
+    println!();
+    println!("SUPPORTED FORMATS:");
+    println!("    - ISO 9660 (standard CD/DVD ISOs)");
+    println!("    - UDF (Blu-ray discs, DVDs)");
+    println!("    - UDF with Metadata Partition (Blu-ray)");
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     
-    // Parse command line arguments
-    let (extract_path, filename) = if args.len() == 4 && args[1] == "-x" {
-        (Some(args[2].clone()), args[3].clone())
-    } else if args.len() == 2 {
-        (None, args[1].clone())
-    } else {
-        eprintln!("Usage: {} [-x ROOT] <file.iso>", args[0]);
-        eprintln!("  -x ROOT  Extract file or directory at ROOT path to current directory");
-        eprintln!("Parses and displays the directory structure of ISO 9660 filesystems.");
-        std::process::exit(1);
+    let mut extract_path = None;
+    let mut output_dir = ".".to_string();
+    let mut filename = None;
+    let mut verbose = false;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                print_help(&args[0]);
+                std::process::exit(0);
+            }
+            "-v" | "--verbose" => {
+                verbose = true;
+            }
+            "-x" | "--extract" => {
+                if i + 1 < args.len() {
+                    extract_path = Some(args[i+1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: -x requires a path argument");
+                    eprintln!("Try '{} --help' for more information.", args[0]);
+                    std::process::exit(1);
+                }
+            }
+            "-o" | "--output" => {
+                if i + 1 < args.len() {
+                    output_dir = args[i+1].clone();
+                    i += 1;
+                } else {
+                    eprintln!("Error: -o requires a directory argument");
+                    eprintln!("Try '{} --help' for more information.", args[0]);
+                    std::process::exit(1);
+                }
+            }
+            arg if arg.starts_with('-') => {
+                eprintln!("Error: Unknown option '{}'", arg);
+                eprintln!("Try '{} --help' for more information.", args[0]);
+                std::process::exit(1);
+            }
+            _ => {
+                if filename.is_none() {
+                    filename = Some(args[i].clone());
+                } else {
+                    eprintln!("Error: Unexpected argument '{}'", args[i]);
+                    eprintln!("Try '{} --help' for more information.", args[0]);
+                    std::process::exit(1);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let filename = match filename {
+        Some(f) => f,
+        None => {
+            print_help(&args[0]);
+            std::process::exit(1);
+        }
     };
     
+    if verbose {
+        println!("Opening file: {}", filename);
+    }
+
     let mut file = match File::open(&filename) {
         Ok(f) => f,
         Err(e) => {
@@ -26,7 +118,7 @@ fn main() {
     };
     
     // Detect filesystem type and parse accordingly
-    let root_node = match detect_and_parse_filesystem(&mut file, &filename) {
+    let root_node = match detect_and_parse_filesystem_verbose(&mut file, &filename, verbose) {
         Ok(node) => node,
         Err(e) => {
             eprintln!("Failed to parse filesystem: {}", e);
@@ -36,8 +128,24 @@ fn main() {
     
     if let Some(extract_path) = extract_path {
         // Extract mode
-        if let Some(node_to_extract) = root_node.find_node(&extract_path) {
-            match extract_node(&mut file, node_to_extract, ".") {
+        let search_path = extract_path.trim_start_matches('/');
+        
+        let node_to_extract = if search_path.is_empty() || extract_path == "/" {
+            Some(&root_node)
+        } else {
+            root_node.find_node(search_path)
+        };
+        
+        if let Some(node) = node_to_extract {
+            // Create output directory if it doesn't exist
+            if output_dir != "." {
+                if let Err(e) = std::fs::create_dir_all(&output_dir) {
+                    eprintln!("Failed to create output directory '{}': {}", output_dir, e);
+                    std::process::exit(1);
+                }
+            }
+            
+            match extract_node(&mut file, node, &output_dir) {
                 Ok(()) => {
                     println!("Extraction completed successfully.");
                 },
@@ -48,6 +156,12 @@ fn main() {
             }
         } else {
             eprintln!("Path '{}' not found in filesystem", extract_path);
+            eprintln!();
+            eprintln!("Available top-level entries:");
+            for child in &root_node.children {
+                let prefix = if child.is_directory { "  📁 " } else { "  📄 " };
+                eprintln!("{}{}", prefix, child.name);
+            }
             std::process::exit(1);
         }
     } else {
@@ -68,7 +182,7 @@ fn print_tree(node: &TreeNode, depth: usize) {
 }
 
 fn format_size(size: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut size = size as f64;
     let mut unit_idx = 0;
     

@@ -16,23 +16,38 @@ pub struct DirectoryRecord {
 }
 
 pub fn parse_iso9660(file: &mut File) -> Result<TreeNode> {
+    parse_iso9660_verbose(file, false)
+}
+
+pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
     // Read Primary Volume Descriptor
-    file.seek(SeekFrom::Start(PRIMARY_VOLUME_DESCRIPTOR_SECTOR * SECTOR_SIZE))?;
+    if let Err(e) = file.seek(SeekFrom::Start(PRIMARY_VOLUME_DESCRIPTOR_SECTOR * SECTOR_SIZE)) {
+        return Err(format!("Failed to seek to PVD: {}", e).into());
+    }
     
     let mut buffer = vec![0u8; SECTOR_SIZE as usize];
-    file.read_exact(&mut buffer)?;
+    if let Err(e) = file.read_exact(&mut buffer) {
+        return Err(format!("Failed to read PVD: {}", e).into());
+    }
     
     // Check for ISO 9660 signature
     if &buffer[1..6] != b"CD001" {
+        if verbose {
+            println!("  ISO 9660 signature 'CD001' not found at sector {}. Found: {:?}", 
+                     PRIMARY_VOLUME_DESCRIPTOR_SECTOR, String::from_utf8_lossy(&buffer[1..6]));
+        }
         return Err("Not a valid ISO 9660 filesystem".into());
     }
     
+    if verbose { println!("  Found ISO 9660 signature at sector {}", PRIMARY_VOLUME_DESCRIPTOR_SECTOR); }
+    
     // Parse root directory record (starts at offset 156)
     let root_record = parse_directory_record(&buffer[156..])?;
+    if verbose { println!("  Root directory at sector {}, size {} bytes", root_record.extent_location, root_record.data_length); }
     
     // Parse the root directory
     let mut root_node = TreeNode::new_directory("/".to_string());
-    parse_directory(file, &root_record, &mut root_node)?;
+    parse_directory(file, &root_record, &mut root_node, verbose)?;
     
     root_node.calculate_directory_size();
     Ok(root_node)
@@ -80,7 +95,7 @@ fn parse_directory_record(data: &[u8]) -> Result<DirectoryRecord> {
     })
 }
 
-fn parse_directory(file: &mut File, dir_record: &DirectoryRecord, parent_node: &mut TreeNode) -> Result<()> {
+fn parse_directory(file: &mut File, dir_record: &DirectoryRecord, parent_node: &mut TreeNode, verbose: bool) -> Result<()> {
     if !dir_record.is_directory || dir_record.data_length == 0 {
         return Ok(());
     }
@@ -107,9 +122,10 @@ fn parse_directory(file: &mut File, dir_record: &DirectoryRecord, parent_node: &
         if let Ok(record) = parse_directory_record(&buffer[offset..]) {
             // Skip "." and ".." entries
             if record.filename != "." && record.filename != ".." {
+                if verbose { println!("    Found {}: {}", if record.is_directory { "dir" } else { "file" }, record.filename); }
                 if record.is_directory {
                     let mut dir_node = TreeNode::new_directory(record.filename.clone());
-                    parse_directory(file, &record, &mut dir_node)?;
+                    parse_directory(file, &record, &mut dir_node, verbose)?;
                     parent_node.add_child(dir_node);
                 } else {
                     let file_node = TreeNode::new_file_with_location(

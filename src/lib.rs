@@ -1,4 +1,5 @@
 pub mod iso9660;
+pub mod udf;
 pub mod tree;
 
 pub use tree::TreeNode;
@@ -8,11 +9,61 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<TreeNode, Box<dyn std::error::Error>> {
-    if let Ok(root) = iso9660::parse_iso9660(file) {
-        return Ok(root);
+    // For now, we'll use a simple environment variable or just internal logic
+    // but the user wants a -v flag. Let's add it to the function signature.
+    detect_and_parse_filesystem_verbose(file, filename, false)
+}
+
+pub fn detect_and_parse_filesystem_verbose(file: &mut File, filename: &str, verbose: bool) -> Result<TreeNode, Box<dyn std::error::Error>> {
+    let mut errors = Vec::new();
+
+    if verbose {
+        // Show file size
+        let file_size = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(0))?;
+        println!("File size: {} bytes ({:.2} GB)", file_size, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+        
+        // Show what's at key sectors
+        println!("Scanning key sectors for filesystem signatures...");
+        for (sector, desc) in [(16, "ISO 9660 PVD / UDF VRS"), (17, "UDF VRS"), (256, "UDF AVDP")].iter() {
+            file.seek(SeekFrom::Start(*sector as u64 * 2048))?;
+            let mut buf = [0u8; 32];
+            if file.read_exact(&mut buf).is_ok() {
+                let printable: String = buf.iter().map(|&b| if b >= 0x20 && b < 0x7f { b as char } else { '.' }).collect();
+                println!("  Sector {:>3} ({}): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  |{}|",
+                    sector, desc, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], &printable[..8]);
+            }
+        }
+        file.seek(SeekFrom::Start(0))?;
+    }
+
+    if verbose { println!("\nAttempting ISO 9660 parsing..."); }
+    match iso9660::parse_iso9660_verbose(file, verbose) {
+        Ok(root) => return Ok(root),
+        Err(e) => {
+            if verbose { println!("  ISO 9660 parsing failed: {}", e); }
+            errors.push(format!("ISO 9660: {}", e));
+        }
     }
     
-    Err(format!("Unable to detect supported filesystem in {}", filename).into())
+    // Seek back to start before trying next parser
+    file.seek(SeekFrom::Start(0))?;
+    if verbose { println!("\nAttempting UDF parsing..."); }
+    match udf::parse_udf_verbose(file, verbose) {
+        Ok(root) => return Ok(root),
+        Err(e) => {
+            if verbose { println!("  UDF parsing failed: {}", e); }
+            errors.push(format!("UDF: {}", e));
+        }
+    }
+    
+    let mut msg = format!("Unable to detect supported filesystem in {}", filename);
+    if !errors.is_empty() {
+        msg.push_str("\nDetails:\n  - ");
+        msg.push_str(&errors.join("\n  - "));
+    }
+    
+    Err(msg.into())
 }
 
 pub fn extract_node(file: &mut File, node: &TreeNode, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
