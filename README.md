@@ -57,13 +57,12 @@ isomage -v movie.iso
 
 ## Supported formats
 
-- **ISO 9660** — standard CD/DVD images
-- **UDF** — DVDs and Blu-rays, including discs with metadata partitions
+- **ISO 9660** — standard CD/DVD images, with Joliet (Unicode filenames) and Rock Ridge (POSIX long filenames) extension support
+- **UDF** — DVDs and Blu-rays, including discs with metadata partitions and multi-extent files
 
 ## Limitations
 
 - Read-only (by design)
-- No multi-extent file support yet (very large files split across multiple extents)
 - Some exotic UDF variations might not parse correctly
 
 If you hit a disc that doesn't work, run with `-v` and open an issue.

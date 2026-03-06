@@ -62,26 +62,24 @@ impl TreeNode {
         if path.is_empty() {
             return Some(self);
         }
-        
+
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() == 1 && parts[0] == self.name {
             return Some(self);
         }
-        
-        if parts.len() > 0 {
-            let first_part = parts[0];
-            for child in &self.children {
-                if child.name == first_part {
-                    if parts.len() == 1 {
-                        return Some(child);
-                    } else {
-                        let remaining_path = parts[1..].join("/");
-                        return child.find_node(&remaining_path);
-                    }
+
+        let first_part = parts[0];
+        for child in &self.children {
+            if child.name == first_part {
+                if parts.len() == 1 {
+                    return Some(child);
+                } else {
+                    let remaining_path = parts[1..].join("/");
+                    return child.find_node(&remaining_path);
                 }
             }
         }
-        
+
         None
     }
 }

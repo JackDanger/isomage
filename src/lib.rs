@@ -86,21 +86,38 @@ pub fn extract_node(file: &mut File, node: &TreeNode, output_path: &str) -> Resu
     Ok(())
 }
 
+const EXTRACT_CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MB chunks
+
 fn extract_file(file: &mut File, node: &TreeNode, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     if let (Some(location), Some(length)) = (node.file_location, node.file_length) {
         file.seek(SeekFrom::Start(location))?;
-        
-        let mut buffer = vec![0u8; length as usize];
-        file.read_exact(&mut buffer)?;
-        
+
         let output_file_path = Path::new(output_path).join(&node.name);
         if let Some(parent) = output_file_path.parent() {
             create_dir_all(parent)?;
         }
-        
+
         let mut output_file = std::fs::File::create(&output_file_path)?;
-        output_file.write_all(&buffer)?;
-        
+        let mut remaining = length as usize;
+        let mut buffer = vec![0u8; EXTRACT_CHUNK_SIZE.min(remaining)];
+
+        while remaining > 0 {
+            let to_read = EXTRACT_CHUNK_SIZE.min(remaining);
+            let buf = &mut buffer[..to_read];
+            file.read_exact(buf)?;
+            output_file.write_all(buf)?;
+            remaining -= to_read;
+
+            // Print progress for large files (> 100 MB)
+            if length > 100 * 1024 * 1024 {
+                let done = length as usize - remaining;
+                eprint!("\r  Extracting {}: {:.1}%", node.name, done as f64 / length as f64 * 100.0);
+            }
+        }
+        if length > 100 * 1024 * 1024 {
+            eprintln!();
+        }
+
         println!("Extracted: {}", output_file_path.display());
     } else {
         return Err("File location information not available for extraction".into());
@@ -114,10 +131,12 @@ fn extract_directory(file: &mut File, node: &TreeNode, output_path: &str) -> Res
     println!("Created directory: {}", dir_path.display());
     
     for child in &node.children {
+        let dir_path_str = dir_path.to_str()
+            .ok_or_else(|| format!("Non-UTF-8 path: {}", dir_path.display()))?;
         if child.is_directory {
-            extract_directory(file, child, dir_path.to_str().unwrap())?;
+            extract_directory(file, child, dir_path_str)?;
         } else {
-            extract_file(file, child, dir_path.to_str().unwrap())?;
+            extract_file(file, child, dir_path_str)?;
         }
     }
     Ok(())
@@ -133,75 +152,45 @@ mod tests {
         format!("test_data/{}", filename)
     }
 
+    fn require_test_file(name: &str) -> Option<File> {
+        let path = test_file_path(name);
+        if !Path::new(&path).exists() {
+            eprintln!("Skipping test: {} not found (run `make test-data` to generate)", path);
+            return None;
+        }
+        Some(File::open(&path).unwrap_or_else(|_| panic!("Failed to open test file: {}", path)))
+    }
+
     #[test]
     fn test_iso9660_parsing() {
-        let test_files = ["test_linux.iso", "test_macos.iso"];
-        
-        for test_file in &test_files {
-            let path = test_file_path(test_file);
-            if Path::new(&path).exists() {
-                let mut file = File::open(&path)
-                    .unwrap_or_else(|_| panic!("Failed to open test file: {}", path));
-                
-                match iso9660::parse_iso9660(&mut file) {
-                    Ok(root_node) => {
-                        assert_eq!(root_node.name, "/");
-                        assert!(root_node.is_directory);
-                        println!("Successfully parsed ISO 9660: {}", test_file);
-                    },
-                    Err(e) => {
-                        println!("ISO 9660 parsing failed for {}: {}", test_file, e);
-                    }
-                }
-            } else {
-                println!("Test file not found: {}", path);
+        for test_file in &["test_linux.iso", "test_macos.iso"] {
+            if let Some(mut file) = require_test_file(test_file) {
+                let root_node = iso9660::parse_iso9660(&mut file)
+                    .unwrap_or_else(|e| panic!("ISO 9660 parsing failed for {}: {}", test_file, e));
+                assert_eq!(root_node.name, "/");
+                assert!(root_node.is_directory);
             }
         }
     }
 
-
     #[test]
     fn test_filesystem_detection() {
-        let test_files = [
-            ("test_linux.iso", "ISO 9660"),
-            ("test_macos.iso", "ISO 9660"),
-        ];
-        
-        for (test_file, expected_type) in &test_files {
-            let path = test_file_path(test_file);
-            if Path::new(&path).exists() {
-                let mut file = File::open(&path)
-                    .unwrap_or_else(|_| panic!("Failed to open test file: {}", path));
-                
-                match detect_and_parse_filesystem(&mut file, test_file) {
-                    Ok(root_node) => {
-                        assert_eq!(root_node.name, "/");
-                        assert!(root_node.is_directory);
-                        println!("Successfully detected {} filesystem in: {}", expected_type, test_file);
-                    },
-                    Err(e) => {
-                        println!("Filesystem detection failed for {}: {}", test_file, e);
-                    }
-                }
-            } else {
-                println!("Test file not found: {}", path);
+        for test_file in &["test_linux.iso", "test_macos.iso"] {
+            if let Some(mut file) = require_test_file(test_file) {
+                let root_node = detect_and_parse_filesystem(&mut file, test_file)
+                    .unwrap_or_else(|e| panic!("Filesystem detection failed for {}: {}", test_file, e));
+                assert_eq!(root_node.name, "/");
+                assert!(root_node.is_directory);
             }
         }
     }
 
     #[test]
     fn test_tree_structure_validation() {
-        let test_file = "test_linux.iso";
-        let path = test_file_path(test_file);
-        
-        if Path::new(&path).exists() {
-            let mut file = File::open(&path)
-                .unwrap_or_else(|_| panic!("Failed to open test file: {}", path));
-            
-            if let Ok(root_node) = detect_and_parse_filesystem(&mut file, test_file) {
-                validate_tree_structure(&root_node, 0);
-                println!("Tree structure validation passed for: {}", test_file);
-            }
+        if let Some(mut file) = require_test_file("test_linux.iso") {
+            let root_node = detect_and_parse_filesystem(&mut file, "test_linux.iso")
+                .expect("Failed to parse test_linux.iso");
+            validate_tree_structure(&root_node, 0);
         }
     }
 
