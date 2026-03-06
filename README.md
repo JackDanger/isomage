@@ -1,64 +1,68 @@
 # isomage
 
 Browse and extract files from ISO images without mounting them.
-I got tired of having to exit a container just to mount an image just to read a file. This tool runs entirely in userspace—no root, no fuse, no mount points.
+
+No root. No FUSE. No mount points. Just read the bytes.
+
+<p align="center">
+  <img src="doc/demo.svg" width="640" alt="isomage demo showing listing, cat, and extraction">
+</p>
 
 ## Install
 
-Grab a binary from releases, or build it yourself:
+Grab a binary from [releases](../../releases), or build from source:
 
 ```
 cargo build --release
 ```
 
-Cross-compile for Linux (from macOS):
-
-```
-make build-linux
-```
-
 ## Usage
 
-List contents:
+**List** what's on a disc:
 
-```
+```sh
 isomage movie.iso
 ```
 
-Extract a file:
+**Cat** a file straight to stdout — no extraction, no temp files:
 
-```
-isomage -x BDMV/STREAM/00000.m2ts movie.iso
-```
-
-Extract a directory:
-
-```
-isomage -x BDMV/STREAM movie.iso
+```sh
+isomage -c BDMV/PLAYLIST/00000.mpls movie.iso | hexdump -C
+isomage -c etc/hostname linux.iso
+isomage -c readme.txt data.iso | less
 ```
 
-Extract everything:
+**Extract** a file, a directory, or everything:
 
-```
-isomage -x / movie.iso
-```
-
-Extract to a specific location:
-
-```
-isomage -x BDMV -o ./output movie.iso
+```sh
+isomage -x BDMV/STREAM/00001.m2ts movie.iso
+isomage -x BDMV/STREAM -o ./streams movie.iso
+isomage -x / -o ./full_dump movie.iso
 ```
 
-Debug a weird disc:
+**Debug** a disc that won't parse:
 
-```
+```sh
 isomage -v movie.iso
 ```
 
 ## Supported formats
 
-- **ISO 9660** — standard CD/DVD images, with Joliet (Unicode filenames) and Rock Ridge (POSIX long filenames) extension support
-- **UDF** — DVDs and Blu-rays, including discs with metadata partitions and multi-extent files
+- **ISO 9660** with Joliet and Rock Ridge extensions
+- **UDF** including metadata partitions and multi-extent files
+
+Covers CDs, DVDs, and Blu-rays.
+
+## Why
+
+I got tired of leaving a container just to `mount` an image just to read one file. `isomage` runs entirely in userspace — it reads the raw bytes and reconstructs the filesystem tree itself.
+
+## Cross-compile
+
+```sh
+make install-targets   # one-time: adds musl target
+make build-linux       # static linux binary from macOS
+```
 
 ## Limitations
 

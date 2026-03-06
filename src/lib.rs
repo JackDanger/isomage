@@ -9,8 +9,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<TreeNode, Box<dyn std::error::Error>> {
-    // For now, we'll use a simple environment variable or just internal logic
-    // but the user wants a -v flag. Let's add it to the function signature.
     detect_and_parse_filesystem_verbose(file, filename, false)
 }
 
@@ -64,6 +62,28 @@ pub fn detect_and_parse_filesystem_verbose(file: &mut File, filename: &str, verb
     }
     
     Err(msg.into())
+}
+
+/// Write a file's contents from the ISO to the given writer (e.g. stdout).
+pub fn cat_node<W: Write>(file: &mut File, node: &TreeNode, writer: &mut W) -> Result<(), Box<dyn std::error::Error>> {
+    if node.is_directory {
+        return Err(format!("'{}' is a directory, not a file", node.name).into());
+    }
+    if let (Some(location), Some(length)) = (node.file_location, node.file_length) {
+        file.seek(SeekFrom::Start(location))?;
+        let mut remaining = length as usize;
+        let mut buffer = vec![0u8; EXTRACT_CHUNK_SIZE.min(remaining)];
+        while remaining > 0 {
+            let to_read = EXTRACT_CHUNK_SIZE.min(remaining);
+            let buf = &mut buffer[..to_read];
+            file.read_exact(buf)?;
+            writer.write_all(buf)?;
+            remaining -= to_read;
+        }
+        Ok(())
+    } else {
+        Err("File location information not available".into())
+    }
 }
 
 pub fn extract_node(file: &mut File, node: &TreeNode, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -130,9 +150,9 @@ fn extract_directory(file: &mut File, node: &TreeNode, output_path: &str) -> Res
     create_dir_all(&dir_path)?;
     println!("Created directory: {}", dir_path.display());
     
+    let dir_path_str = dir_path.to_str()
+        .ok_or_else(|| format!("Non-UTF-8 path: {}", dir_path.display()))?;
     for child in &node.children {
-        let dir_path_str = dir_path.to_str()
-            .ok_or_else(|| format!("Non-UTF-8 path: {}", dir_path.display()))?;
         if child.is_directory {
             extract_directory(file, child, dir_path_str)?;
         } else {
@@ -237,13 +257,83 @@ mod tests {
         let mut root = TreeNode::new_directory("root".to_string());
         root.add_child(TreeNode::new_file("file1.txt".to_string(), 100));
         root.add_child(TreeNode::new_file("file2.txt".to_string(), 200));
-        
+
         let mut subdir = TreeNode::new_directory("subdir".to_string());
         subdir.add_child(TreeNode::new_file("file3.txt".to_string(), 300));
         root.add_child(subdir);
-        
+
         root.calculate_directory_size();
-        
+
         assert_eq!(root.size, 600);
+    }
+
+    #[test]
+    fn test_cat_file_to_buffer() {
+        if let Some(mut file) = require_test_file("test_linux.iso") {
+            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
+                .expect("Failed to parse test_linux.iso");
+
+            // Cat a known file
+            let node = root.find_node("etc/hostname")
+                .expect("etc/hostname not found in test ISO");
+
+            let mut output = Vec::new();
+            cat_node(&mut file, node, &mut output)
+                .expect("cat_node failed");
+
+            let content = String::from_utf8(output).expect("Not valid UTF-8");
+            assert!(content.contains("test-linux-system"), "Expected hostname content, got: {:?}", content);
+        }
+    }
+
+    #[test]
+    fn test_cat_rejects_directory() {
+        if let Some(mut file) = require_test_file("test_linux.iso") {
+            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
+                .expect("Failed to parse test_linux.iso");
+
+            let node = root.find_node("etc")
+                .expect("etc/ not found in test ISO");
+
+            let mut output = Vec::new();
+            let result = cat_node(&mut file, node, &mut output);
+            assert!(result.is_err(), "cat_node should reject directories");
+            assert!(result.unwrap_err().to_string().contains("directory"));
+        }
+    }
+
+    #[test]
+    fn test_cat_multiple_files() {
+        if let Some(mut file) = require_test_file("test_linux.iso") {
+            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
+                .expect("Failed to parse test_linux.iso");
+
+            // Cat two different files and verify they produce different content
+            let files_and_expected = [
+                ("etc/hostname", "test-linux-system"),
+                ("etc/hosts", "127.0.0.1"),
+                ("boot/grub.cfg", "GRUB"),
+            ];
+            for (path, expected_substr) in &files_and_expected {
+                let node = root.find_node(path)
+                    .unwrap_or_else(|| panic!("{} not found", path));
+                let mut output = Vec::new();
+                cat_node(&mut file, node, &mut output)
+                    .unwrap_or_else(|e| panic!("cat_node failed for {}: {}", path, e));
+                let content = String::from_utf8(output).expect("Not valid UTF-8");
+                assert!(content.contains(expected_substr),
+                    "Expected '{}' in {}, got: {:?}", expected_substr, path, content);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cat_nonexistent_path() {
+        if let Some(mut file) = require_test_file("test_linux.iso") {
+            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
+                .expect("Failed to parse test_linux.iso");
+
+            assert!(root.find_node("nonexistent/file.txt").is_none());
+        }
     }
 }

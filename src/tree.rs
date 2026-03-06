@@ -63,20 +63,21 @@ impl TreeNode {
             return Some(self);
         }
 
-        let parts: Vec<&str> = path.split('/').collect();
-        if parts.len() == 1 && parts[0] == self.name {
+        if path == self.name {
             return Some(self);
         }
 
-        let first_part = parts[0];
+        let (first, rest) = match path.find('/') {
+            Some(pos) => (&path[..pos], Some(&path[pos + 1..])),
+            None => (path, None),
+        };
+
         for child in &self.children {
-            if child.name == first_part {
-                if parts.len() == 1 {
-                    return Some(child);
-                } else {
-                    let remaining_path = parts[1..].join("/");
-                    return child.find_node(&remaining_path);
-                }
+            if child.name == first {
+                return match rest {
+                    Some(remaining) => child.find_node(remaining),
+                    None => Some(child),
+                };
             }
         }
 

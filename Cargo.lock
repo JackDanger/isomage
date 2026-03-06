@@ -53,12 +53,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "clap"
 version = "4.5.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -120,7 +114,6 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 name = "isomage"
 version = "0.1.0"
 dependencies = [
- "byteorder",
  "clap",
 ]
 

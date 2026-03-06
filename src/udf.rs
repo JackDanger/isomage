@@ -36,6 +36,8 @@ struct MetadataPartitionInfo {
 struct FileAllocation {
     extents: Vec<ExtentAd>,
     total_length: u64,
+    /// For inline data (ad_type 3), the raw data is stored here.
+    inline_data: Option<Vec<u8>>,
 }
 
 fn read_extent_ad(buffer: &[u8]) -> ExtentAd {
@@ -203,7 +205,7 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
         if verbose { println!("  Metadata FE tag: {}", meta_tag_id); }
 
         // Read first extent of metadata file
-        let meta_alloc = get_file_allocation(file, &meta_fe_buffer)?;
+        let meta_alloc = get_file_allocation(&meta_fe_buffer)?;
         let first_extent = meta_alloc.extents.first()
             .ok_or("Metadata file has no allocation extents")?;
 
@@ -258,7 +260,7 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
 }
 
 /// Parse all allocation descriptors from a File Entry buffer, supporting multi-extent files.
-fn get_file_allocation(file: &mut File, fe_buffer: &[u8]) -> Result<FileAllocation> {
+fn get_file_allocation(fe_buffer: &[u8]) -> Result<FileAllocation> {
     let tag_id = u16::from_le_bytes([fe_buffer[0], fe_buffer[1]]);
 
     let (ad_length_offset, ea_length_offset, ad_data_offset_base) = match tag_id {
@@ -283,10 +285,9 @@ fn get_file_allocation(file: &mut File, fe_buffer: &[u8]) -> Result<FileAllocati
 
     let ad_offset = ad_data_offset_base + ea_length;
 
-    let _ = file; // Not needed for inline ADs, but kept for future continuation extent support
-
     let mut extents = Vec::new();
     let mut total_length: u64 = 0;
+    let mut inline_data = None;
 
     match ad_type {
         0 => {
@@ -329,12 +330,12 @@ fn get_file_allocation(file: &mut File, fe_buffer: &[u8]) -> Result<FileAllocati
             }
         }
         3 => {
-            // Inline data — data is embedded in the allocation descriptor area
-            // For directories, the data is right in the file entry
-            let length = ad_length as u32;
-            // Use a sentinel location of 0 — callers must handle inline data specially
-            extents.push(ExtentAd { length, location: 0 });
-            total_length = length as u64;
+            // Inline data — embedded directly in the file entry at the AD area
+            let end = (ad_offset + ad_length).min(fe_buffer.len());
+            if ad_offset < end {
+                inline_data = Some(fe_buffer[ad_offset..end].to_vec());
+                total_length = (end - ad_offset) as u64;
+            }
         }
         _ => {
             // Fallback: try reading a single extent at the expected offset
@@ -348,11 +349,11 @@ fn get_file_allocation(file: &mut File, fe_buffer: &[u8]) -> Result<FileAllocati
         }
     }
 
-    if extents.is_empty() {
+    if extents.is_empty() && inline_data.is_none() {
         return Err("No allocation extents found in file entry".into());
     }
 
-    Ok(FileAllocation { extents, total_length })
+    Ok(FileAllocation { extents, total_length, inline_data })
 }
 
 fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, parent_node: &mut TreeNode, verbose: bool) -> Result<()> {
@@ -361,20 +362,29 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
     let mut fe_buffer = vec![0u8; SECTOR_SIZE as usize];
     file.read_exact(&mut fe_buffer)?;
 
-    let alloc = get_file_allocation(file, &fe_buffer)?;
+    let alloc = get_file_allocation(&fe_buffer)?;
 
     if verbose {
-        println!("  Directory has {} extent(s), total {} bytes", alloc.extents.len(), alloc.total_length);
+        if alloc.inline_data.is_some() {
+            println!("  Directory has inline data, {} bytes", alloc.total_length);
+        } else {
+            println!("  Directory has {} extent(s), total {} bytes", alloc.extents.len(), alloc.total_length);
+        }
     }
 
-    // Read all extents into a single buffer
-    let mut buffer = Vec::with_capacity(alloc.total_length as usize);
-    for extent in &alloc.extents {
-        file.seek(SeekFrom::Start((partition_start + extent.location as u64) * SECTOR_SIZE))?;
-        let mut chunk = vec![0u8; extent.length as usize];
-        file.read_exact(&mut chunk)?;
-        buffer.extend_from_slice(&chunk);
-    }
+    // Read directory data — either inline or from extents
+    let buffer = if let Some(data) = alloc.inline_data {
+        data
+    } else {
+        let mut buf = Vec::with_capacity(alloc.total_length as usize);
+        for extent in &alloc.extents {
+            file.seek(SeekFrom::Start((partition_start + extent.location as u64) * SECTOR_SIZE))?;
+            let mut chunk = vec![0u8; extent.length as usize];
+            file.read_exact(&mut chunk)?;
+            buf.extend_from_slice(&chunk);
+        }
+        buf
+    };
 
     let mut offset = 0;
     while offset < buffer.len() {
@@ -455,7 +465,7 @@ fn get_file_info(file: &mut File, partition_start: u64, icb_long_ad: &LongAd) ->
     let mut fe_buffer = vec![0u8; SECTOR_SIZE as usize];
     file.read_exact(&mut fe_buffer)?;
 
-    get_file_allocation(file, &fe_buffer)
+    get_file_allocation(&fe_buffer)
 }
 
 fn parse_udf_name(data: &[u8]) -> String {
