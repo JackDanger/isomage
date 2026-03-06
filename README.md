@@ -10,10 +10,35 @@ No root. No FUSE. No mount points. Just read the bytes.
 
 ## Install
 
-Grab a binary from [releases](../../releases), or build from source:
+**Homebrew** (macOS and Linux):
 
+```sh
+brew install jackdanger/tap/isomage
 ```
-cargo build --release
+
+**Cargo** (any platform with Rust):
+
+```sh
+cargo install isomage
+```
+
+**Binary** — grab a prebuilt binary from [releases](../../releases):
+
+```sh
+# macOS (Apple Silicon)
+curl -L https://github.com/JackDanger/isomage/releases/latest/download/isomage-macos-arm64.tar.gz | tar xz
+sudo mv isomage-macos-arm64 /usr/local/bin/isomage
+
+# Linux (x86_64, static musl)
+curl -L https://github.com/JackDanger/isomage/releases/latest/download/isomage-linux-x86_64.tar.gz | tar xz
+sudo mv isomage-linux-x86_64 /usr/local/bin/isomage
+```
+
+**From source**:
+
+```sh
+git clone https://github.com/JackDanger/isomage.git
+cd isomage && cargo build --release
 ```
 
 ## Usage
