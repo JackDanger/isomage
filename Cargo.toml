@@ -2,6 +2,8 @@
 name = "isomage"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["Jack Danger <github@jackdanger.com>"]
 
 [[bin]]
 name = "isomage"

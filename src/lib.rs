@@ -181,14 +181,31 @@ mod tests {
         Some(File::open(&path).unwrap_or_else(|_| panic!("Failed to open test file: {}", path)))
     }
 
+    fn parse_linux_iso() -> Option<(File, TreeNode)> {
+        let mut file = require_test_file("test_linux.iso")?;
+        let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
+            .expect("Failed to parse test_linux.iso");
+        Some((file, root))
+    }
+
+    fn parse_macos_iso() -> Option<(File, TreeNode)> {
+        let mut file = require_test_file("test_macos.iso")?;
+        let root = detect_and_parse_filesystem(&mut file, "test_macos.iso")
+            .expect("Failed to parse test_macos.iso");
+        Some((file, root))
+    }
+
+    // ---- Parsing & detection ----
+
     #[test]
     fn test_iso9660_parsing() {
         for test_file in &["test_linux.iso", "test_macos.iso"] {
             if let Some(mut file) = require_test_file(test_file) {
-                let root_node = iso9660::parse_iso9660(&mut file)
+                let root = iso9660::parse_iso9660(&mut file)
                     .unwrap_or_else(|e| panic!("ISO 9660 parsing failed for {}: {}", test_file, e));
-                assert_eq!(root_node.name, "/");
-                assert!(root_node.is_directory);
+                assert_eq!(root.name, "/");
+                assert!(root.is_directory);
+                assert!(!root.children.is_empty(), "{} should have children", test_file);
             }
         }
     }
@@ -197,45 +214,136 @@ mod tests {
     fn test_filesystem_detection() {
         for test_file in &["test_linux.iso", "test_macos.iso"] {
             if let Some(mut file) = require_test_file(test_file) {
-                let root_node = detect_and_parse_filesystem(&mut file, test_file)
+                let root = detect_and_parse_filesystem(&mut file, test_file)
                     .unwrap_or_else(|e| panic!("Filesystem detection failed for {}: {}", test_file, e));
-                assert_eq!(root_node.name, "/");
-                assert!(root_node.is_directory);
+                assert_eq!(root.name, "/");
+                assert!(root.is_directory);
             }
         }
     }
 
     #[test]
-    fn test_tree_structure_validation() {
-        if let Some(mut file) = require_test_file("test_linux.iso") {
-            let root_node = detect_and_parse_filesystem(&mut file, "test_linux.iso")
-                .expect("Failed to parse test_linux.iso");
-            validate_tree_structure(&root_node, 0);
-        }
+    fn test_invalid_file_handling() {
+        assert!(File::open(test_file_path("nonexistent.iso")).is_err());
     }
 
-    fn validate_tree_structure(node: &TreeNode, depth: usize) {
-        assert!(!node.name.is_empty(), "Node name should not be empty");
-        
-        if depth > 10 {
-            panic!("Tree depth exceeded reasonable limit");
-        }
-        
-        if !node.is_directory {
-            assert!(node.children.is_empty(), "Files should not have children");
-        }
-        
-        for child in &node.children {
-            validate_tree_structure(child, depth + 1);
+    #[test]
+    fn test_garbage_data_rejected() {
+        // Create a temp file with garbage data
+        let dir = std::env::temp_dir().join("isomage_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let garbage_path = dir.join("garbage.iso");
+        std::fs::write(&garbage_path, b"this is not an ISO file at all").unwrap();
+
+        let mut file = File::open(&garbage_path).unwrap();
+        let result = detect_and_parse_filesystem(&mut file, "garbage.iso");
+        assert!(result.is_err(), "Garbage data should fail to parse");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unable to detect"), "Error should mention detection failure, got: {}", err);
+
+        std::fs::remove_file(&garbage_path).ok();
+    }
+
+    // ---- Linux ISO structure verification ----
+
+    #[test]
+    fn test_linux_iso_expected_directories() {
+        if let Some((_file, root)) = parse_linux_iso() {
+            for dir_name in &["boot", "etc", "home", "usr", "var"] {
+                let node = root.find_node(dir_name)
+                    .unwrap_or_else(|| panic!("Expected directory '{}' not found", dir_name));
+                assert!(node.is_directory, "'{}' should be a directory", dir_name);
+            }
         }
     }
 
     #[test]
-    fn test_invalid_file_handling() {
-        let invalid_path = test_file_path("nonexistent.iso");
-        
-        assert!(File::open(&invalid_path).is_err(), "Should not be able to open nonexistent file");
+    fn test_linux_iso_expected_files() {
+        if let Some((_file, root)) = parse_linux_iso() {
+            let expected_files = [
+                "boot/grub.cfg",
+                "etc/hostname",
+                "etc/hosts",
+                "home/user/.bashrc",
+                "usr/bin/hello",
+                "var/log/system.log",
+            ];
+            for path in &expected_files {
+                let node = root.find_node(path)
+                    .unwrap_or_else(|| panic!("Expected file '{}' not found", path));
+                assert!(!node.is_directory, "'{}' should be a file", path);
+                assert!(node.size > 0, "'{}' should have non-zero size", path);
+                assert!(node.file_location.is_some(), "'{}' should have a file location", path);
+                assert!(node.file_length.is_some(), "'{}' should have a file length", path);
+            }
+        }
     }
+
+    #[test]
+    fn test_linux_iso_nested_structure() {
+        if let Some((_file, root)) = parse_linux_iso() {
+            // Verify home/user/.bashrc exists through directory traversal
+            let home = root.find_node("home").expect("home not found");
+            assert!(home.is_directory);
+            let user = home.find_node("user").expect("user not found in home");
+            assert!(user.is_directory);
+            let bashrc = user.find_node(".bashrc").expect(".bashrc not found in user");
+            assert!(!bashrc.is_directory);
+        }
+    }
+
+    // ---- macOS ISO structure verification ----
+
+    #[test]
+    fn test_macos_iso_expected_structure() {
+        if let Some((_file, root)) = parse_macos_iso() {
+            for dir_name in &["Applications", "System", "Users", "private"] {
+                let node = root.find_node(dir_name)
+                    .unwrap_or_else(|| panic!("Expected directory '{}' not found in macOS ISO", dir_name));
+                assert!(node.is_directory);
+            }
+
+            let expected_files = [
+                "Applications/readme.txt",
+                "System/Library/info.txt",
+                "Users/user/welcome.txt",
+                "private/var/log/system.log",
+            ];
+            for path in &expected_files {
+                let node = root.find_node(path)
+                    .unwrap_or_else(|| panic!("Expected file '{}' not found in macOS ISO", path));
+                assert!(!node.is_directory);
+                assert!(node.size > 0);
+            }
+        }
+    }
+
+    // ---- Tree structure validation ----
+
+    #[test]
+    fn test_tree_structure_validation() {
+        for (name, parser) in [("linux", parse_linux_iso as fn() -> Option<(File, TreeNode)>),
+                                ("macos", parse_macos_iso)] {
+            if let Some((_file, root)) = parser() {
+                validate_tree_structure(&root, 0, name);
+            }
+        }
+    }
+
+    fn validate_tree_structure(node: &TreeNode, depth: usize, iso_name: &str) {
+        assert!(!node.name.is_empty(), "Node name should not be empty in {}", iso_name);
+        assert!(depth <= 10, "Tree depth exceeded limit in {}", iso_name);
+
+        if !node.is_directory {
+            assert!(node.children.is_empty(), "File '{}' should not have children in {}", node.name, iso_name);
+        }
+
+        for child in &node.children {
+            validate_tree_structure(child, depth + 1, iso_name);
+        }
+    }
+
+    // ---- TreeNode unit tests ----
 
     #[test]
     fn test_tree_node_creation() {
@@ -244,12 +352,17 @@ mod tests {
         assert_eq!(dir_node.name, "test_dir");
         assert_eq!(dir_node.size, 0);
         assert!(dir_node.children.is_empty());
+        assert!(dir_node.file_location.is_none());
 
         let file_node = TreeNode::new_file("test_file.txt".to_string(), 1024);
         assert!(!file_node.is_directory);
         assert_eq!(file_node.name, "test_file.txt");
         assert_eq!(file_node.size, 1024);
-        assert!(file_node.children.is_empty());
+        assert!(file_node.file_location.is_none());
+
+        let located = TreeNode::new_file_with_location("f.bin".to_string(), 512, 4096, 512);
+        assert_eq!(located.file_location, Some(4096));
+        assert_eq!(located.file_length, Some(512));
     }
 
     #[test]
@@ -265,75 +378,232 @@ mod tests {
         root.calculate_directory_size();
 
         assert_eq!(root.size, 600);
+        // Subdir should also have its size calculated
+        let sub = root.find_node("subdir").unwrap();
+        assert_eq!(sub.size, 300);
+    }
+
+    // ---- find_node edge cases ----
+
+    #[test]
+    fn test_find_node_with_leading_slash() {
+        if let Some((_file, root)) = parse_linux_iso() {
+            // Leading slash should be stripped
+            assert!(root.find_node("/etc/hostname").is_some());
+            assert!(root.find_node("etc/hostname").is_some());
+            // Multiple leading slashes
+            assert!(root.find_node("///etc/hostname").is_some());
+        }
     }
 
     #[test]
-    fn test_cat_file_to_buffer() {
-        if let Some(mut file) = require_test_file("test_linux.iso") {
-            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
-                .expect("Failed to parse test_linux.iso");
+    fn test_find_node_root_paths() {
+        if let Some((_file, root)) = parse_linux_iso() {
+            // Empty path and "/" both return root
+            let by_empty = root.find_node("").unwrap();
+            assert_eq!(by_empty.name, "/");
+            let by_slash = root.find_node("/").unwrap();
+            assert_eq!(by_slash.name, "/");
+        }
+    }
 
-            // Cat a known file
+    #[test]
+    fn test_find_node_nonexistent() {
+        if let Some((_file, root)) = parse_linux_iso() {
+            assert!(root.find_node("nonexistent").is_none());
+            assert!(root.find_node("etc/nonexistent").is_none());
+            assert!(root.find_node("a/b/c/d/e/f").is_none());
+        }
+    }
+
+    // ---- cat tests ----
+
+    #[test]
+    fn test_cat_file_to_buffer() {
+        if let Some((mut file, root)) = parse_linux_iso() {
             let node = root.find_node("etc/hostname")
-                .expect("etc/hostname not found in test ISO");
+                .expect("etc/hostname not found");
 
             let mut output = Vec::new();
-            cat_node(&mut file, node, &mut output)
-                .expect("cat_node failed");
+            cat_node(&mut file, node, &mut output).expect("cat_node failed");
 
             let content = String::from_utf8(output).expect("Not valid UTF-8");
-            assert!(content.contains("test-linux-system"), "Expected hostname content, got: {:?}", content);
+            assert!(content.contains("test-linux-system"),
+                "Expected hostname content, got: {:?}", content);
+        }
+    }
+
+    #[test]
+    fn test_cat_preserves_exact_bytes() {
+        if let Some((mut file, root)) = parse_linux_iso() {
+            let node = root.find_node("etc/hostname").expect("etc/hostname not found");
+
+            let mut output = Vec::new();
+            cat_node(&mut file, node, &mut output).expect("cat_node failed");
+
+            // Output length should match the node's reported size
+            assert_eq!(output.len() as u64, node.size,
+                "cat output length {} doesn't match node size {}", output.len(), node.size);
         }
     }
 
     #[test]
     fn test_cat_rejects_directory() {
-        if let Some(mut file) = require_test_file("test_linux.iso") {
-            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
-                .expect("Failed to parse test_linux.iso");
-
-            let node = root.find_node("etc")
-                .expect("etc/ not found in test ISO");
+        if let Some((mut file, root)) = parse_linux_iso() {
+            let node = root.find_node("etc").expect("etc/ not found");
 
             let mut output = Vec::new();
             let result = cat_node(&mut file, node, &mut output);
-            assert!(result.is_err(), "cat_node should reject directories");
+            assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("directory"));
+            assert!(output.is_empty(), "No bytes should be written for a directory");
         }
     }
 
     #[test]
-    fn test_cat_multiple_files() {
-        if let Some(mut file) = require_test_file("test_linux.iso") {
-            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
-                .expect("Failed to parse test_linux.iso");
+    fn test_cat_node_without_location() {
+        let node = TreeNode::new_file("orphan.txt".to_string(), 100);
+        // Create a dummy file to pass as the ISO (won't be read)
+        let dir = std::env::temp_dir().join("isomage_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dummy_path = dir.join("dummy.bin");
+        std::fs::write(&dummy_path, b"x").unwrap();
+        let mut file = File::open(&dummy_path).unwrap();
 
-            // Cat two different files and verify they produce different content
-            let files_and_expected = [
+        let mut output = Vec::new();
+        let result = cat_node(&mut file, &node, &mut output);
+        assert!(result.is_err(), "cat on file without location should error");
+        assert!(result.unwrap_err().to_string().contains("not available"));
+
+        std::fs::remove_file(&dummy_path).ok();
+    }
+
+    #[test]
+    fn test_cat_every_file_in_linux_iso() {
+        if let Some((mut file, root)) = parse_linux_iso() {
+            let files = [
+                ("boot/grub.cfg", "GRUB"),
                 ("etc/hostname", "test-linux-system"),
                 ("etc/hosts", "127.0.0.1"),
-                ("boot/grub.cfg", "GRUB"),
+                ("home/user/.bashrc", "Bash"),
+                ("usr/bin/hello", "Hello World"),
+                ("var/log/system.log", "System started"),
             ];
-            for (path, expected_substr) in &files_and_expected {
+            for (path, expected) in &files {
                 let node = root.find_node(path)
                     .unwrap_or_else(|| panic!("{} not found", path));
                 let mut output = Vec::new();
                 cat_node(&mut file, node, &mut output)
-                    .unwrap_or_else(|e| panic!("cat_node failed for {}: {}", path, e));
+                    .unwrap_or_else(|e| panic!("cat failed for {}: {}", path, e));
                 let content = String::from_utf8(output).expect("Not valid UTF-8");
-                assert!(content.contains(expected_substr),
-                    "Expected '{}' in {}, got: {:?}", expected_substr, path, content);
+                assert!(content.contains(expected),
+                    "Expected '{}' in {}, got: {:?}", expected, path, content);
             }
         }
     }
 
     #[test]
-    fn test_cat_nonexistent_path() {
-        if let Some(mut file) = require_test_file("test_linux.iso") {
-            let root = detect_and_parse_filesystem(&mut file, "test_linux.iso")
-                .expect("Failed to parse test_linux.iso");
+    fn test_cat_every_file_in_macos_iso() {
+        if let Some((mut file, root)) = parse_macos_iso() {
+            let files = [
+                ("Applications/readme.txt", "Application Data"),
+                ("System/Library/info.txt", "System Library"),
+                ("Users/user/welcome.txt", "Welcome to macOS"),
+                ("private/var/log/system.log", "macOS system log"),
+            ];
+            for (path, expected) in &files {
+                let node = root.find_node(path)
+                    .unwrap_or_else(|| panic!("{} not found in macOS ISO", path));
+                let mut output = Vec::new();
+                cat_node(&mut file, node, &mut output)
+                    .unwrap_or_else(|e| panic!("cat failed for {}: {}", path, e));
+                let content = String::from_utf8(output).expect("Not valid UTF-8");
+                assert!(content.contains(expected),
+                    "Expected '{}' in {}, got: {:?}", expected, path, content);
+            }
+        }
+    }
 
-            assert!(root.find_node("nonexistent/file.txt").is_none());
+    // ---- extraction tests ----
+
+    #[test]
+    fn test_extract_single_file() {
+        if let Some((mut file, root)) = parse_linux_iso() {
+            let dir = std::env::temp_dir().join("isomage_test_extract_single");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let node = root.find_node("etc/hostname").expect("etc/hostname not found");
+            extract_node(&mut file, node, dir.to_str().unwrap()).expect("extract failed");
+
+            let extracted = std::fs::read_to_string(dir.join("hostname")).unwrap();
+            assert!(extracted.contains("test-linux-system"));
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn test_extract_directory() {
+        if let Some((mut file, root)) = parse_linux_iso() {
+            let dir = std::env::temp_dir().join("isomage_test_extract_dir");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let node = root.find_node("etc").expect("etc not found");
+            extract_node(&mut file, node, dir.to_str().unwrap()).expect("extract failed");
+
+            // Should create etc/ subdirectory with both files
+            assert!(dir.join("etc/hostname").exists(), "hostname should exist");
+            assert!(dir.join("etc/hosts").exists(), "hosts should exist");
+
+            let hostname = std::fs::read_to_string(dir.join("etc/hostname")).unwrap();
+            assert!(hostname.contains("test-linux-system"));
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn test_extract_root() {
+        if let Some((mut file, root)) = parse_linux_iso() {
+            let dir = std::env::temp_dir().join("isomage_test_extract_root");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            extract_node(&mut file, &root, dir.to_str().unwrap()).expect("extract root failed");
+
+            // All top-level dirs should exist
+            for name in &["boot", "etc", "home", "usr", "var"] {
+                assert!(dir.join(name).is_dir(), "{} directory should exist", name);
+            }
+            // Deep file should exist
+            assert!(dir.join("home/user/.bashrc").exists(), ".bashrc should exist");
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn test_extract_matches_cat() {
+        if let Some((mut file, root)) = parse_linux_iso() {
+            let dir = std::env::temp_dir().join("isomage_test_extract_vs_cat");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let node = root.find_node("etc/hosts").expect("etc/hosts not found");
+
+            // Get cat output
+            let mut cat_output = Vec::new();
+            cat_node(&mut file, node, &mut cat_output).expect("cat failed");
+
+            // Extract to disk
+            extract_node(&mut file, node, dir.to_str().unwrap()).expect("extract failed");
+            let extracted = std::fs::read(dir.join("hosts")).unwrap();
+
+            assert_eq!(cat_output, extracted, "cat and extract should produce identical bytes");
+
+            std::fs::remove_dir_all(&dir).ok();
         }
     }
 }
