@@ -134,7 +134,7 @@ fn detect_rock_ridge(file: &mut File, dir_record: &DirectoryRecord) -> Result<bo
 }
 
 fn parse_directory_record(data: &[u8], vd_type: VolumeDescriptorType) -> Result<DirectoryRecord> {
-    if data.len() < 33 {
+    if data.len() < 34 {
         return Err("Directory record too short".into());
     }
 
@@ -147,6 +147,11 @@ fn parse_directory_record(data: &[u8], vd_type: VolumeDescriptorType) -> Result<
     let data_length = u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
     let file_flags = data[25];
     let filename_length = data[32] as usize;
+
+    // Ensure data[33..33+filename_length] is in bounds
+    if 33 + filename_length > data.len() {
+        return Err("Directory record filename extends past buffer".into());
+    }
 
     let is_directory = (file_flags & 0x02) != 0;
 

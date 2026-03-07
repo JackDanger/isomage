@@ -138,9 +138,10 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
                 // Partition maps start at offset 440
                 let mut map_offset = 440usize;
                 for map_idx in 0..num_partition_maps {
-                    if map_offset >= vds_buffer.len() { break; }
+                    if map_offset + 2 > vds_buffer.len() { break; }
                     let map_type = vds_buffer[map_offset];
                     let map_length = vds_buffer[map_offset + 1] as usize;
+                    if map_length == 0 { break; } // malformed map: avoid infinite loop
 
                     if verbose { eprintln!("    Partition map {}: type {}, length {}", map_idx, map_type, map_length); }
 
@@ -433,14 +434,18 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
             } else {
                 match get_file_info(file, partition_start, &icb) {
                     Ok(alloc) => {
-                        // Store location of first extent for extraction
-                        let first = &alloc.extents[0];
-                        let file_node = TreeNode::new_file_with_location(
-                            name,
-                            alloc.total_length,
-                            (partition_start + first.location as u64) * SECTOR_SIZE,
-                            alloc.total_length
-                        );
+                        let file_node = if let Some(first) = alloc.extents.first() {
+                            // Extent-based file: record location for extraction
+                            TreeNode::new_file_with_location(
+                                name,
+                                alloc.total_length,
+                                (partition_start + first.location as u64) * SECTOR_SIZE,
+                                alloc.total_length
+                            )
+                        } else {
+                            // Inline data (ad_type 3): size known but no extent location
+                            TreeNode::new_file(name, alloc.total_length)
+                        };
                         parent_node.add_child(file_node);
                     }
                     Err(e) => {
