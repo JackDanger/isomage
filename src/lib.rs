@@ -19,38 +19,38 @@ pub fn detect_and_parse_filesystem_verbose(file: &mut File, filename: &str, verb
         // Show file size
         let file_size = file.seek(SeekFrom::End(0))?;
         file.seek(SeekFrom::Start(0))?;
-        println!("File size: {} bytes ({:.2} GB)", file_size, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
-        
+        eprintln!("File size: {} bytes ({:.2} GB)", file_size, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+
         // Show what's at key sectors
-        println!("Scanning key sectors for filesystem signatures...");
+        eprintln!("Scanning key sectors for filesystem signatures...");
         for (sector, desc) in [(16, "ISO 9660 PVD / UDF VRS"), (17, "UDF VRS"), (256, "UDF AVDP")].iter() {
             file.seek(SeekFrom::Start(*sector as u64 * 2048))?;
             let mut buf = [0u8; 32];
             if file.read_exact(&mut buf).is_ok() {
                 let printable: String = buf.iter().map(|&b| if b >= 0x20 && b < 0x7f { b as char } else { '.' }).collect();
-                println!("  Sector {:>3} ({}): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  |{}|",
+                eprintln!("  Sector {:>3} ({}): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  |{}|",
                     sector, desc, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], &printable[..8]);
             }
         }
         file.seek(SeekFrom::Start(0))?;
     }
 
-    if verbose { println!("\nAttempting ISO 9660 parsing..."); }
+    if verbose { eprintln!("\nAttempting ISO 9660 parsing..."); }
     match iso9660::parse_iso9660_verbose(file, verbose) {
         Ok(root) => return Ok(root),
         Err(e) => {
-            if verbose { println!("  ISO 9660 parsing failed: {}", e); }
+            if verbose { eprintln!("  ISO 9660 parsing failed: {}", e); }
             errors.push(format!("ISO 9660: {}", e));
         }
     }
-    
+
     // Seek back to start before trying next parser
     file.seek(SeekFrom::Start(0))?;
-    if verbose { println!("\nAttempting UDF parsing..."); }
+    if verbose { eprintln!("\nAttempting UDF parsing..."); }
     match udf::parse_udf_verbose(file, verbose) {
         Ok(root) => return Ok(root),
         Err(e) => {
-            if verbose { println!("  UDF parsing failed: {}", e); }
+            if verbose { eprintln!("  UDF parsing failed: {}", e); }
             errors.push(format!("UDF: {}", e));
         }
     }
@@ -138,7 +138,7 @@ fn extract_file(file: &mut File, node: &TreeNode, output_path: &str) -> Result<(
             eprintln!();
         }
 
-        println!("Extracted: {}", output_file_path.display());
+        eprintln!("Extracted: {}", output_file_path.display());
     } else {
         return Err("File location information not available for extraction".into());
     }
@@ -148,7 +148,7 @@ fn extract_file(file: &mut File, node: &TreeNode, output_path: &str) -> Result<(
 fn extract_directory(file: &mut File, node: &TreeNode, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let dir_path = Path::new(output_path).join(&node.name);
     create_dir_all(&dir_path)?;
-    println!("Created directory: {}", dir_path.display());
+    eprintln!("Created directory: {}", dir_path.display());
     
     let dir_path_str = dir_path.to_str()
         .ok_or_else(|| format!("Non-UTF-8 path: {}", dir_path.display()))?;
