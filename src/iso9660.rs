@@ -41,7 +41,7 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
         if &buffer[1..6] != b"CD001" {
             if sector == PRIMARY_VOLUME_DESCRIPTOR_SECTOR {
                 if verbose {
-                    println!("  ISO 9660 signature 'CD001' not found at sector {}. Found: {:?}",
+                    eprintln!("  ISO 9660 signature 'CD001' not found at sector {}. Found: {:?}",
                              sector, String::from_utf8_lossy(&buffer[1..6]));
                 }
                 return Err("Not a valid ISO 9660 filesystem".into());
@@ -52,7 +52,7 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
         let vd_type = buffer[0];
         match vd_type {
             1 => {
-                if verbose { println!("  Found Primary Volume Descriptor at sector {}", sector); }
+                if verbose { eprintln!("  Found Primary Volume Descriptor at sector {}", sector); }
                 primary_vd = Some(buffer);
             }
             2 => {
@@ -60,12 +60,12 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
                 // Joliet is indicated by escape sequences in bytes 88-90
                 let escape = &buffer[88..91];
                 if escape == b"%/@" || escape == b"%/C" || escape == b"%/E" {
-                    if verbose { println!("  Found Joliet Volume Descriptor at sector {}", sector); }
+                    if verbose { eprintln!("  Found Joliet Volume Descriptor at sector {}", sector); }
                     joliet_vd = Some(buffer);
                 }
             }
             255 => {
-                if verbose { println!("  Volume Descriptor Set Terminator at sector {}", sector); }
+                if verbose { eprintln!("  Volume Descriptor Set Terminator at sector {}", sector); }
                 break;
             }
             _ => {}
@@ -83,13 +83,13 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
     };
 
     if verbose {
-        println!("  Using {} Volume Descriptor",
+        eprintln!("  Using {} Volume Descriptor",
             if vd_type == VolumeDescriptorType::Joliet { "Joliet" } else { "Primary" });
     }
 
     // Parse root directory record (starts at offset 156)
     let root_record = parse_directory_record(&buffer[156..], vd_type)?;
-    if verbose { println!("  Root directory at sector {}, size {} bytes", root_record.extent_location, root_record.data_length); }
+    if verbose { eprintln!("  Root directory at sector {}, size {} bytes", root_record.extent_location, root_record.data_length); }
 
     // Check for Rock Ridge (we'll detect it when parsing the root directory)
     let mut root_node = TreeNode::new_directory("/".to_string());
@@ -98,7 +98,7 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
     } else {
         false
     };
-    if verbose && use_rock_ridge { println!("  Rock Ridge extensions detected"); }
+    if verbose && use_rock_ridge { eprintln!("  Rock Ridge extensions detected"); }
 
     parse_directory(file, &root_record, &mut root_node, vd_type, use_rock_ridge, verbose)?;
 
@@ -271,7 +271,7 @@ fn parse_directory(file: &mut File, dir_record: &DirectoryRecord, parent_node: &
 
             // Skip "." and ".." entries
             if record.filename != "." && record.filename != ".." {
-                if verbose { println!("    Found {}: {}", if record.is_directory { "dir" } else { "file" }, record.filename); }
+                if verbose { eprintln!("    Found {}: {}", if record.is_directory { "dir" } else { "file" }, record.filename); }
                 if record.is_directory {
                     let mut dir_node = TreeNode::new_directory(record.filename.clone());
                     parse_directory(file, &record, &mut dir_node, vd_type, use_rock_ridge, verbose)?;
