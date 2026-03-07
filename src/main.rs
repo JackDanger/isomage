@@ -78,11 +78,9 @@ fn main() {
         };
 
         if let Some(node) = node_to_extract {
-            if cli.output != "." {
-                if let Err(e) = std::fs::create_dir_all(&cli.output) {
-                    eprintln!("Failed to create output directory '{}': {}", cli.output, e);
-                    std::process::exit(1);
-                }
+            if let Err(e) = std::fs::create_dir_all(&cli.output) {
+                eprintln!("Failed to create output directory '{}': {}", cli.output, e);
+                std::process::exit(1);
             }
 
             match extract_node(&mut file, node, &cli.output) {
@@ -114,7 +112,14 @@ fn print_available_entries(root: &TreeNode) {
     }
 }
 
+const MAX_TREE_DEPTH: usize = 100;
+
 fn print_tree(node: &TreeNode, depth: usize) {
+    if depth > MAX_TREE_DEPTH {
+        let indent = "  ".repeat(depth);
+        println!("{}... (depth limit reached)", indent);
+        return;
+    }
     let indent = "  ".repeat(depth);
     let prefix = if node.is_directory { "d " } else { "- " };
     println!("{}{}{} ({})", indent, prefix, node.name, format_size(node.size));
