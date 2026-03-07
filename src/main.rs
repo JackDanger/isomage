@@ -3,27 +3,53 @@ use std::io;
 use clap::Parser;
 use isomage::{detect_and_parse_filesystem_verbose, extract_node, cat_node, TreeNode};
 
-/// ISO/UDF filesystem browser and extractor
+/// Browse and extract files from ISO images without mounting them.
+///
+/// MODES
+///
+/// List all files and directories (no flags):
+///
+///   isomage IMAGE
+///
+/// Stream a file from the ISO to stdout (-c):
+///
+///   isomage -c PATH IMAGE
+///
+/// Extract a file or directory to disk (-x):
+///
+///   isomage -x PATH IMAGE
+///
+/// PATHS
+///
+/// Leading slash is optional: "etc/hostname" and "/etc/hostname" both work.
+/// Use "/" with -x to extract the entire disc.
+///
+/// OUTPUT
+///
+/// All diagnostic output (verbose, progress, errors) goes to stderr.
+/// Only file data goes to stdout — -c is binary-safe and pipe-friendly:
+///
+///   isomage -c BDMV/STREAM/00000.m2ts movie.iso | mpv -
 #[derive(Parser)]
-#[command(name = "isomage", version, about)]
+#[command(name = "isomage", version)]
 struct Cli {
-    /// ISO file to open
+    /// Path to the ISO image (ISO 9660 or UDF)
     file: String,
 
-    /// Show detailed parsing information
+    /// Print filesystem parsing details to stderr
     #[arg(short, long)]
     verbose: bool,
 
-    /// Print a file's contents to stdout
+    /// Stream PATH from the ISO to stdout (raw bytes; pipe-safe; cannot combine with --extract)
     #[arg(short = 'c', long = "cat", value_name = "PATH", conflicts_with = "extract")]
     cat: Option<String>,
 
-    /// Extract file or directory at PATH
+    /// Extract PATH to disk. Directories are extracted recursively. Use / for the entire disc.
     #[arg(short = 'x', long = "extract", value_name = "PATH")]
     extract: Option<String>,
 
-    /// Output directory for extraction (default: current directory)
-    #[arg(short, long, default_value = ".")]
+    /// Write extracted files into DIR (created if needed)
+    #[arg(short, long, default_value = ".", value_name = "DIR")]
     output: String,
 }
 
