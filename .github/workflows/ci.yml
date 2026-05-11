@@ -34,6 +34,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check for prompt log entry
+        env:
+          # Pass SHAs from the PR event payload — SHAs are always present
+          # in the local repo after fetch-depth: 0, while remote-tracking
+          # refs may not be set up the way we expect.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           chmod +x scripts/check_promptlog.sh
-          scripts/check_promptlog.sh "origin/${{ github.base_ref }}" "HEAD"
+          scripts/check_promptlog.sh "$BASE_SHA" "$HEAD_SHA"

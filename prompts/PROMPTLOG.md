@@ -4,8 +4,8 @@ When you make a git commit that changes source code, also commit a sanitized
 log of the prompts that led to it — both the human's and the assistant's.
 
 If you are an AI agent reading this file: **the CI gate will fail your PR if
-it touches `src/` without adding a file under `prompts/`.** Read on, or invoke
-the `promptlog` skill at `.claude/skills/promptlog.md`.
+it touches `src/` or `Cargo.toml` without adding a file under `prompts/`.**
+Read on, or invoke the `promptlog` skill at `.claude/skills/promptlog.md`.
 
 ## Why
 
@@ -244,8 +244,11 @@ CI will pass on the second push.
 `.github/workflows/ci.yml` runs a `prompt-log` job on every pull request.
 It fails the PR when:
 
-- The PR adds, changes, or modifies any file under `src/`, **and**
+- The PR adds, changes, or modifies any file under `src/` or the top-level `Cargo.toml`, **and**
 - The PR does not add a new file under `prompts/`
+
+The exact watched paths are defined by `WATCH_REGEX` in
+`scripts/check_promptlog.sh` — that is the single source of truth.
 
 To bypass legitimately (e.g. a worktree-agent code commit that will get a
 prompt log in a follow-up), push the follow-up commit — CI re-runs and
