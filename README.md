@@ -4,9 +4,29 @@ Browse and extract files from ISO images without mounting them.
 
 No root. No FUSE. No mount points. Just read the bytes.
 
-<p align="center">
-  <img src="doc/demo.svg" width="640" alt="isomage demo showing listing, cat, and extraction">
-</p>
+```sh
+curl -fsSL https://raw.githubusercontent.com/JackDanger/isomage/main/install.sh | sh
+```
+
+```console
+$ isomage movie.iso
+d / (24.8 GB)
+  d BDMV (24.8 GB)
+    d STREAM (24.7 GB)
+      - 00000.m2ts (20.1 GB)
+      - 00001.m2ts (4.6 GB)
+    d CLIPINF (1.2 KB)
+    d PLAYLIST (408 B)
+  - CERTIFICATE (3.1 KB)
+
+$ isomage -c BDMV/PLAYLIST/00000.mpls movie.iso | hexdump -C | head
+00000000  4d 50 4c 53 30 32 30 30  00 00 00 ea 00 00 00
+00000010  00 00 01 1a 00 00 00 00  00 01 00 00 00 01 00
+
+$ isomage -x BDMV/STREAM/00001.m2ts -o ./extras movie.iso
+Extracted: ./extras/00001.m2ts
+Extraction completed successfully.
+```
 
 ## Install
 
