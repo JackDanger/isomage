@@ -215,6 +215,16 @@ make build-linux       # static linux binary from macOS
 
 If you hit a disc that doesn't work, run with `-v` and open an issue.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). isomage follows the
+[promptlog pattern](https://jackdanger.com/promptlog/): PRs that change
+source code must include a sanitized log of the prompts that led to the
+change, under `prompts/`. The format and CI gate are documented in
+[`prompts/PROMPTLOG.md`](prompts/PROMPTLOG.md), and there's a step-by-step
+skill for AI agents at
+[`.claude/skills/promptlog.md`](.claude/skills/promptlog.md).
+
 ## License
 
 [MIT](LICENSE)

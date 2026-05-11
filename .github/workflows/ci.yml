@@ -24,3 +24,16 @@ jobs:
         run: cargo build
       - name: Test
         run: cargo test
+
+  prompt-log:
+    name: Prompt log check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for prompt log entry
+        run: |
+          chmod +x scripts/check_promptlog.sh
+          scripts/check_promptlog.sh "origin/${{ github.base_ref }}" "HEAD"
