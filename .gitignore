@@ -1,3 +1,7 @@
-.claude
+# .claude/ holds both committed agent guardrails (skills/) and local-only
+# artifacts (worktrees, host-specific settings). Ignore the latter, track
+# the former.
+.claude/worktrees/
+.claude/settings.local.json
 /target
 releases
