@@ -5,3 +5,20 @@
 .claude/settings.local.json
 /target
 releases
+
+# Stray artifacts that have escaped `test_data/` in the past:
+# `make test-data`'s recipe writes `boot/grub.cfg` under
+# `test_data/linux_source/`, but if the make is invoked from the
+# wrong CWD the relative path lands in the repo root. Ignore
+# top-level `boot/` and a few other test-data leakage paths.
+/boot/
+
+# Stray $IMAGE files from misuse of the round-trip harness during
+# development (where $IMAGE substitution wasn't yet wired up).
+/$IMAGE
+/$SRC_DIR
+/$OUT_DIR
+
+# Snapshot tempdirs from test runs.
+/isomage-rt-*
+/isomage-cat-*

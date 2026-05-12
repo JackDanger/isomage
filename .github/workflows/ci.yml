@@ -35,12 +35,218 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y genisoimage
       - name: Generate test data
         run: make test-data
-      - name: Build (lib)
+      - name: Build (lib, default features)
         run: cargo build --all-targets
-      - name: Test (lib unit + integration)
+      # The most surgical regression check: default features only,
+      # tests included. v3.0 broadens the feature matrix but the
+      # default-features build path is the user-facing API contract.
+      - name: Test (lib unit + integration, default features)
         run: cargo test --all-targets
+      # Zero-formats build. If a new feature accidentally hard-depends
+      # on `iso` or `udf`, this fails before the broad matrix does.
+      - name: Build (--no-default-features)
+        run: cargo build --no-default-features
+      # Each individual feature should compile in isolation, so a
+      # contributor adding a new format under `--features <new>` doesn't
+      # need every other feature on too. Spot-check three combos.
+      - name: Build (selected feature combos)
+        run: |
+          cargo build --no-default-features --features iso
+          cargo build --no-default-features --features udf
+          cargo build --no-default-features --features mmap
+          cargo build --no-default-features --features simd
+          cargo build --no-default-features --features mbr,gpt,raw
+      # All-features test. Round-trip binaries skip on macOS without
+      # format tools and run for real on the round-trip job.
+      - name: Test (all v3.0 features enabled)
+        run: cargo test --features mbr,gpt,raw,mmap,simd
       - name: Doc-tests
-        run: cargo test --doc
+        run: cargo test --doc --features mbr,gpt,raw,mmap,simd
+      # Compile-check the bench harness even though we don't run it
+      # here (criterion benches are non-deterministic on shared
+      # runners). Regressions in the bench code itself surface here.
+      - name: Compile benches
+        run: cargo bench --no-run --features mmap,simd
+
+  # ---------------------------------------------------------------------
+  # Reference-tool round-trip tests. Installs the partition-table,
+  # filesystem, and disk-image authoring tools that `tests/*_round_trip.rs`
+  # exercise, then runs them with ISOMAGE_REQUIRE_TOOLS=1 so a missing
+  # tool fails the test rather than skipping silently.
+  #
+  # The list of tools mirrors `tests/common/binaries.rs`. When a new
+  # format lands, both files get updated in the same PR.
+  # ---------------------------------------------------------------------
+  round-trip:
+    name: round-trip (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: round-trip-${{ matrix.os }}
+
+      - name: Install format tools (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            util-linux \
+            gdisk \
+            parted \
+            xorriso \
+            qemu-utils \
+            dosfstools \
+            exfatprogs \
+            squashfs-tools \
+            wimtools \
+            e2fsprogs \
+            mtools \
+            ntfs-3g \
+            p7zip-full
+
+      - name: Install format tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Most tools live in Homebrew. NTFS write tools and sfdisk
+          # aren't available on macOS — the matching round-trip tests
+          # skip there even with ISOMAGE_REQUIRE_MACOS_ONLY behaviour.
+          brew update >/dev/null
+          brew install \
+            gptfdisk \
+            xorriso \
+            qemu \
+            dosfstools \
+            exfatprogs \
+            squashfs \
+            wimlib \
+            e2fsprogs \
+            mtools \
+            sevenzip || true
+
+      - name: Build round-trip tests
+        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt --tests
+
+      - name: Run round-trip tests (Ubuntu strict)
+        if: runner.os == 'Linux'
+        env:
+          ISOMAGE_REQUIRE_TOOLS: "1"
+        # Restrict to *_round_trip binaries plus the harness self-test.
+        # Library unit-tests are covered by the `test` job above; running
+        # them again here is redundant.
+        run: |
+          for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
+            echo "=== $bin ==="
+            cargo test --features mmap,simd,raw,mbr,gpt --test "$bin"
+          done
+
+      - name: Run round-trip tests (macOS, non-strict)
+        if: runner.os == 'macOS'
+        # macOS doesn't ship sfdisk / mkntfs / debugfs even with brew;
+        # tests that need them skip rather than fail. The matching
+        # Ubuntu job above runs in strict mode so coverage is enforced
+        # on exactly one platform.
+        run: |
+          for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
+            echo "=== $bin ==="
+            cargo test --features mmap,simd,raw,mbr,gpt --test "$bin"
+          done
+
+  # ---------------------------------------------------------------------
+  # Round-trip tests against the *pinned* Docker tool image. This
+  # complements the apt-based `round-trip` job above:
+  #
+  #   - `round-trip` uses Ubuntu's apt repo — fast, but its tool
+  #     versions drift over time and might cause committed snapshot
+  #     files to need re-pinning every few months.
+  #   - `round-trip-pinned` uses ghcr.io/<owner>/isomage-test-tools,
+  #     which freezes every tool's version. Snapshots tied to a
+  #     specific image tag stay stable.
+  #
+  # Both run on every PR; both must pass. If they disagree, that's
+  # almost always an apt-repo drift that needs the snapshot
+  # re-pinned, not a code regression.
+  # ---------------------------------------------------------------------
+  round-trip-pinned:
+    name: round-trip-pinned (docker)
+    runs-on: ubuntu-latest
+    # Only run when the image exists. On the very first push that
+    # introduces this job, the image hasn't been built yet — the
+    # `test-tools-image` workflow needs a tag push first. Skip if
+    # we can't pull the image rather than failing.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: round-trip-pinned
+
+      - name: Derive image reference
+        id: image
+        run: |
+          owner_lower=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/${owner_lower}/isomage-test-tools:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Pull pinned tool image
+        id: pull
+        run: |
+          if docker pull "${{ steps.image.outputs.ref }}"; then
+            echo "have_image=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_image=0" >> "$GITHUB_OUTPUT"
+            echo "::warning::pinned tool image not yet published; skipping job"
+          fi
+
+      - name: Run round-trip tests through the pinned image
+        if: steps.pull.outputs.have_image == '1'
+        env:
+          ISOMAGE_TOOL_VENUE: docker:${{ steps.image.outputs.ref }}
+          ISOMAGE_REQUIRE_TOOLS: "1"
+        run: |
+          for bin in $(ls tests/*_round_trip.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
+            echo "=== $bin ==="
+            cargo test --features mmap,simd,raw,mbr,gpt --test "$bin"
+          done
+
+  # ---------------------------------------------------------------------
+  # Compile the cargo-fuzz targets under nightly. We don't *run* the
+  # fuzzers in CI (libFuzzer needs tens of seconds of warmup before it
+  # finds anything interesting, and runner minutes are finite) — but
+  # ensuring the targets still build catches API drift in the parsers
+  # they exercise. A separate, opt-in `fuzz-nightly` workflow runs the
+  # fuzzers themselves.
+  # ---------------------------------------------------------------------
+  fuzz-compile:
+    name: cargo fuzz build (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache key from the main test job so the nightly
+          # toolchain bits don't poison the stable cache.
+          key: fuzz-compile
+          workspaces: |
+            .
+            fuzz
+      - name: Install cargo-fuzz
+        # No `--locked` here: cargo-fuzz's own Cargo.lock pins an
+        # old `rustix 0.36.5` whose internals (`rustc_attrs`-gated
+        # `rustc_layout_scalar_valid_range_end`) no longer compile
+        # on current nightly. Letting cargo resolve fresh deps
+        # picks a newer rustix that builds clean.
+        run: cargo install cargo-fuzz
+      - name: Build all fuzz targets
+        run: cargo +nightly fuzz build
 
   # ---------------------------------------------------------------------
   # Formatting must match `cargo fmt`.
@@ -88,6 +294,13 @@ jobs:
   # The crate must still build on its declared minimum supported Rust.
   # Library MSRV failures are a worse user-experience than build flags
   # because cargo install / cargo add succeeds and then linking fails.
+  #
+  # We check `cargo build --lib` (the published library), NOT
+  # `--all-targets`. MSRV applies to downstream consumers, who never
+  # see our dev-dependencies. Modern criterion/tempfile transitively
+  # pull crates that use Rust 2024 edition (clap 4.6+); requiring
+  # those to build at MSRV would tie our floor to the latest stable.
+  # Tests/benches build under the main `test` job's stable toolchain.
   # ---------------------------------------------------------------------
   msrv:
     name: MSRV
@@ -106,7 +319,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv-${{ env.MSRV }}
-      - run: cargo build --all-targets
+      # `--lib` skips tests/benches/examples — exactly what downstream
+      # users compile. We also pass each non-default feature so a
+      # feature-flagged code path can't sneak in a newer-MSRV
+      # requirement.
+      - name: cargo build --lib (default features)
+        run: cargo build --lib
+      - name: cargo build --lib (--no-default-features)
+        run: cargo build --lib --no-default-features
+      - name: cargo build --lib (every feature combo we ship)
+        run: |
+          for feat in iso udf mmap simd mbr gpt raw write; do
+            cargo build --lib --no-default-features --features "$feat"
+          done
+          cargo build --lib --features mmap,simd,mbr,gpt,raw
 
   # ---------------------------------------------------------------------
   # Known-vulnerable dependencies. With zero direct deps the surface is
@@ -148,7 +374,7 @@ jobs:
         run: |
           set -euo pipefail
           tar tzf target/package/isomage-*.crate > /tmp/packaged.txt
-          forbidden_re='(^|/)(prompts|scripts|test_data|\.claude|\.github)/|install\.sh$|Makefile$'
+          forbidden_re='(^|/)(prompts|scripts|test_data|tests|fuzz|\.claude|\.github)/|install\.sh$|Makefile$|HANDOFF\.md$|Dockerfile'
           if grep -E "$forbidden_re" /tmp/packaged.txt; then
             echo "::error::publish contains files that should be excluded by Cargo.toml [include]" >&2
             exit 1

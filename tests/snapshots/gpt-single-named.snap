@@ -1,0 +1,5 @@
+# isomage tree snapshot v1
+# reference: GPT fdisk (sgdisk) version 1.0.10
+# ---
+d/
+  -Linux-0                          location=1048576    size=10485760

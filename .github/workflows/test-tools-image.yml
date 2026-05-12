@@ -1,0 +1,86 @@
+name: Build & publish test-tools image
+
+# The reference-tool round-trip tests can opt into a pinned Docker
+# image (see tests/common/venue.rs, Dockerfile.test-tools). This
+# workflow builds and pushes that image to GHCR.
+#
+# Triggers:
+#   - manual via workflow_dispatch (for ad-hoc rebuilds)
+#   - on push of a `test-tools-v*` tag (the canonical release path)
+#   - on PRs that touch the Dockerfile (build-only, no push)
+#
+# Image is tagged with the git tag and `latest`. Older tags are
+# never deleted from GHCR — committed snapshot files reference
+# specific versions and need that immutability.
+
+on:
+  push:
+    tags:
+      - "test-tools-v*"
+  pull_request:
+    paths:
+      - "Dockerfile.test-tools"
+      - ".github/workflows/test-tools-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Only on tag push / manual run; PR builds are local-only.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          owner_lower=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner_lower}/isomage-test-tools"
+          version="${GITHUB_REF##*/}"
+          case "$GITHUB_REF" in
+              refs/tags/test-tools-v*)
+                  echo "tags=${image}:${version#test-tools-},${image}:latest" >> "$GITHUB_OUTPUT"
+                  echo "push=true" >> "$GITHUB_OUTPUT"
+                  ;;
+              *)
+                  echo "tags=${image}:pr-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+                  echo "push=false" >> "$GITHUB_OUTPUT"
+                  ;;
+          esac
+
+      - name: Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.test-tools
+          tags: ${{ steps.tags.outputs.tags }}
+          push: ${{ steps.tags.outputs.push }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Print pinned tool versions (smoke test)
+        if: steps.tags.outputs.push == 'false'
+        run: |
+          # On PR builds we don't push, but we still want a sanity
+          # check that the image is healthy. Load it locally and
+          # run its default CMD.
+          docker buildx build \
+              --load \
+              -f Dockerfile.test-tools \
+              -t isomage-test-tools:local .
+          docker run --rm isomage-test-tools:local

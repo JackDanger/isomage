@@ -1,0 +1,57 @@
+# Fuzzing harness for the isomage parsers. NOT published; the
+# main crate's `include = [...]` allow-list excludes the entire
+# `fuzz/` tree, and the CI `package` job's deny-list re-asserts
+# the same constraint defensively.
+#
+# Build & run:
+#
+#     rustup install nightly                            # cargo-fuzz needs nightly + libFuzzer
+#     cargo install cargo-fuzz
+#     cargo +nightly fuzz run mbr_parse_sector          # run forever
+#     cargo +nightly fuzz run mbr_parse_sector -- -max_total_time=60   # 60s
+#
+# Corpora live under `fuzz/corpus/<target>/` and are git-ignored.
+# Seeds (small known-interesting inputs) go in `fuzz/seeds/<target>/`
+# and ARE committed — they bootstrap the corpus on a fresh clone.
+
+[package]
+name = "isomage-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.74"
+
+# cargo-fuzz looks for this to recognise a fuzz subcrate.
+[package.metadata]
+cargo-fuzz = true
+
+# Declare this directory as its own standalone workspace root so
+# `cargo` invocations from the *parent* directory don't try to
+# resolve fuzz/Cargo.toml as a workspace member. Without this,
+# `cargo clippy --features mbr,gpt,raw,mmap,simd` from the repo
+# root fails because `isomage-fuzz` doesn't declare those features.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.isomage]
+path = ".."
+default-features = false
+features = ["mbr", "gpt"]
+
+# Prevent cargo from trying to publish or build benchmarks.
+[[bin]]
+name = "mbr_parse_sector"
+path = "fuzz_targets/mbr_parse_sector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gpt_parse_header_sector"
+path = "fuzz_targets/gpt_parse_header_sector.rs"
+test = false
+doc = false
+bench = false

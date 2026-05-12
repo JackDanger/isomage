@@ -1,0 +1,8 @@
+# Fuzzing artifacts are not source-controlled. The seeds/ directory
+# (committed) bootstraps the corpus on a fresh clone; the corpus/
+# directory (not committed) accumulates inputs cargo-fuzz finds
+# interesting over the course of a run.
+target/
+corpus/
+artifacts/
+Cargo.lock

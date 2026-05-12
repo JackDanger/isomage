@@ -1,0 +1,67 @@
+# Sidecar container image for `isomage`'s reference-tool round-trip
+# tests. Holds pinned versions of every external CLI we exercise
+# (`sfdisk`, `sgdisk`, `qemu-img`, `mkfs.vfat`, `mkfs.exfat`,
+# `mksquashfs`, `wimlib-imagex`, `mkntfs`, `debugfs`, `xorriso`,
+# `mtools`, …) so committed snapshot files stay stable across
+# Ubuntu-repo drift.
+#
+# Used by:
+#   - Round-trip tests when ISOMAGE_TOOL_VENUE=docker:<image> is set
+#     (see tests/common/venue.rs).
+#   - CI's optional `round-trip-pinned` job.
+#   - macOS contributors who want to run round-trips against
+#     Linux-only tools without `linuxbrew`.
+#
+# Pinning strategy: we anchor on a Debian 12 (bookworm) base because
+# its tool versions move on a slow schedule (security-only point
+# releases) — much more predictable than Ubuntu LTS interim updates.
+# Each tool's resulting version is recorded in the GHCR tag the
+# image is published as.
+#
+# Build & push (maintainer-only):
+#   docker build -f Dockerfile.test-tools \
+#       -t ghcr.io/jackdanger/isomage-test-tools:v1 .
+#   docker push ghcr.io/jackdanger/isomage-test-tools:v1
+#
+# The corresponding GitHub Actions workflow at
+# .github/workflows/test-tools-image.yml automates this on tag push.
+
+FROM debian:bookworm-slim
+
+# `--no-install-recommends` keeps the image lean (~250 MB final).
+# Tools are alphabetised so future additions slot in obviously.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        dosfstools \
+        e2fsprogs \
+        exfatprogs \
+        fdisk \
+        gdisk \
+        mtools \
+        ntfs-3g \
+        parted \
+        p7zip-full \
+        qemu-utils \
+        squashfs-tools \
+        util-linux \
+        wimtools \
+        xorriso \
+ && rm -rf /var/lib/apt/lists/*
+
+# A neutral working directory. Tests bind-mount their own tempdirs
+# under whatever host path they chose; the entrypoint is `/bin/sh -c`
+# style so no ENTRYPOINT/CMD lock-in.
+WORKDIR /work
+
+# Convenience: a no-args run prints the pinned tool versions for
+# release-note ammo and as a sanity check.
+CMD bash -c "echo '=== isomage-test-tools — pinned versions ==='; \
+    for t in sfdisk sgdisk xorriso qemu-img mkfs.vfat mkfs.exfat \
+             mksquashfs wimlib-imagex mkntfs debugfs e2fsck \
+             mtools 7zz parted fdisk; do \
+        printf '%-20s ' \"\$t\"; \
+        command -v \"\$t\" >/dev/null \
+            && (\$t --version 2>&1 || \$t -V 2>&1) | head -1 \
+            || echo '(not installed)'; \
+    done"
