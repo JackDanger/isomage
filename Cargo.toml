@@ -1,15 +1,28 @@
 [package]
 name = "isomage"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
+rust-version = "1.74"
 license = "MIT"
 authors = ["Jack Danger <github@jackdanger.com>"]
 description = "Browse and extract files from ISO images without mounting them"
 repository = "https://github.com/JackDanger/isomage"
 homepage = "https://github.com/JackDanger/isomage"
+documentation = "https://docs.rs/isomage"
 keywords = ["iso", "iso9660", "udf", "bluray", "filesystem"]
 categories = ["command-line-utilities", "filesystem"]
 readme = "README.md"
+# Control which files actually get uploaded to crates.io. Excludes worktrees,
+# generated artifacts, prompt logs, and anything not needed to build or use
+# the crate. `LICENSE` and `README.md` are included automatically by cargo.
+include = [
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+]
 
 [[bin]]
 name = "isomage"
@@ -21,6 +34,8 @@ path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+clap_mangen = "0.2"
 
 [profile.release]
 opt-level = 2

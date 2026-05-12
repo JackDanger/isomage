@@ -1,7 +1,8 @@
+use clap::{CommandFactory, Parser};
+use clap_complete::Shell;
+use isomage::{cat_node, detect_and_parse_filesystem_verbose, extract_node, TreeNode};
 use std::fs::File;
 use std::io;
-use clap::Parser;
-use isomage::{detect_and_parse_filesystem_verbose, extract_node, cat_node, TreeNode};
 
 /// Browse and extract files from ISO images without mounting them.
 ///
@@ -31,17 +32,23 @@ use isomage::{detect_and_parse_filesystem_verbose, extract_node, cat_node, TreeN
 ///
 ///   isomage -c BDMV/STREAM/00000.m2ts movie.iso | mpv -
 #[derive(Parser)]
-#[command(name = "isomage", version)]
+#[command(name = "isomage", version, about, long_about = None)]
 struct Cli {
     /// Path to the ISO image (ISO 9660 or UDF)
-    file: String,
+    #[arg(required_unless_present_any = ["completions", "man_page"])]
+    file: Option<String>,
 
     /// Print filesystem parsing details to stderr
     #[arg(short, long)]
     verbose: bool,
 
     /// Stream PATH from the ISO to stdout (raw bytes; pipe-safe; cannot combine with --extract)
-    #[arg(short = 'c', long = "cat", value_name = "PATH", conflicts_with = "extract")]
+    #[arg(
+        short = 'c',
+        long = "cat",
+        value_name = "PATH",
+        conflicts_with = "extract"
+    )]
     cat: Option<String>,
 
     /// Extract PATH to disk. Directories are extracted recursively. Use / for the entire disc.
@@ -51,24 +58,56 @@ struct Cli {
     /// Write extracted files into DIR (created if needed)
     #[arg(short, long, default_value = ".", value_name = "DIR")]
     output: String,
+
+    /// Print shell-completion script for SHELL to stdout, then exit.
+    ///
+    /// Example: `isomage --completions bash > /usr/local/etc/bash_completion.d/isomage`
+    #[arg(long, value_name = "SHELL", value_enum, exclusive = true)]
+    completions: Option<Shell>,
+
+    /// Print a man page (groff format) for `isomage` to stdout, then exit.
+    ///
+    /// Example: `isomage --man-page > /usr/local/share/man/man1/isomage.1`
+    #[arg(long = "man-page", exclusive = true)]
+    man_page: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
 
-    if cli.verbose {
-        eprintln!("Opening file: {}", cli.file);
+    // Tooling-integration flags handled before any I/O: they emit a single
+    // stdout artifact and exit cleanly so a CI pipeline can capture them.
+    if let Some(shell) = cli.completions {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, name, &mut io::stdout());
+        return;
+    }
+    if cli.man_page {
+        let cmd = Cli::command();
+        if let Err(e) = clap_mangen::Man::new(cmd).render(&mut io::stdout()) {
+            eprintln!("Failed to render man page: {}", e);
+            std::process::exit(1);
+        }
+        return;
     }
 
-    let mut file = match File::open(&cli.file) {
+    // `required_unless_present_any` guarantees `file` is Some here.
+    let file_path = cli.file.expect("clap should have enforced --file presence");
+
+    if cli.verbose {
+        eprintln!("Opening file: {}", file_path);
+    }
+
+    let mut file = match File::open(&file_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Failed to open file '{}': {}", cli.file, e);
+            eprintln!("Failed to open file '{}': {}", file_path, e);
             std::process::exit(1);
         }
     };
 
-    let root_node = match detect_and_parse_filesystem_verbose(&mut file, &cli.file, cli.verbose) {
+    let root_node = match detect_and_parse_filesystem_verbose(&mut file, &file_path, cli.verbose) {
         Ok(node) => node,
         Err(e) => {
             eprintln!("Failed to parse filesystem: {}", e);
@@ -112,7 +151,7 @@ fn main() {
             match extract_node(&mut file, node, &cli.output) {
                 Ok(()) => {
                     eprintln!("Extraction completed successfully.");
-                },
+                }
                 Err(e) => {
                     eprintln!("Failed to extract '{}': {}", extract_path, e);
                     std::process::exit(1);
@@ -148,7 +187,13 @@ fn print_tree(node: &TreeNode, depth: usize) {
     }
     let indent = "  ".repeat(depth);
     let prefix = if node.is_directory { "d " } else { "- " };
-    println!("{}{}{} ({})", indent, prefix, node.name, format_size(node.size));
+    println!(
+        "{}{}{} ({})",
+        indent,
+        prefix,
+        node.name,
+        format_size(node.size)
+    );
 
     for child in &node.children {
         print_tree(child, depth + 1);

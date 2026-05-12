@@ -1,7 +1,13 @@
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+//! ISO 9660 / ECMA-119 parser, with the Joliet (Unicode filenames) and
+//! Rock Ridge (POSIX long filenames) extensions.
+//!
+//! The entry points are [`parse_iso9660`] and [`parse_iso9660_verbose`].
+//! Both return a [`crate::TreeNode`] tree rooted at `"/"` on success.
+
+use crate::tree::TreeNode;
+use crate::Result;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use crate::tree::TreeNode;
 
 const SECTOR_SIZE: u64 = 2048;
 const PRIMARY_VOLUME_DESCRIPTOR_SECTOR: u64 = 16;
@@ -20,10 +26,17 @@ enum VolumeDescriptorType {
     Joliet,
 }
 
+/// Parse an ISO 9660 image, returning the root of the directory tree.
+///
+/// Equivalent to `parse_iso9660_verbose(file, false)`. Errors out cleanly
+/// (returns `Err`, never panics) on images whose volume descriptors don't
+/// validate.
 pub fn parse_iso9660(file: &mut File) -> Result<TreeNode> {
     parse_iso9660_verbose(file, false)
 }
 
+/// Like [`parse_iso9660`], but prints spec-section-tagged diagnostics to
+/// stderr while parsing. Useful for investigating images that fail.
 pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
     // Scan all volume descriptors to find Primary and Joliet
     let mut primary_vd: Option<Vec<u8>> = None;
@@ -41,8 +54,11 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
         if &buffer[1..6] != b"CD001" {
             if sector == PRIMARY_VOLUME_DESCRIPTOR_SECTOR {
                 if verbose {
-                    eprintln!("  ISO 9660 signature 'CD001' not found at sector {}. Found: {:?}",
-                             sector, String::from_utf8_lossy(&buffer[1..6]));
+                    eprintln!(
+                        "  ISO 9660 signature 'CD001' not found at sector {}. Found: {:?}",
+                        sector,
+                        String::from_utf8_lossy(&buffer[1..6])
+                    );
                 }
                 return Err("Not a valid ISO 9660 filesystem".into());
             }
@@ -52,7 +68,9 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
         let vd_type = buffer[0];
         match vd_type {
             1 => {
-                if verbose { eprintln!("  Found Primary Volume Descriptor at sector {}", sector); }
+                if verbose {
+                    eprintln!("  Found Primary Volume Descriptor at sector {}", sector);
+                }
                 primary_vd = Some(buffer);
             }
             2 => {
@@ -60,12 +78,16 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
                 // Joliet is indicated by escape sequences in bytes 88-90
                 let escape = &buffer[88..91];
                 if escape == b"%/@" || escape == b"%/C" || escape == b"%/E" {
-                    if verbose { eprintln!("  Found Joliet Volume Descriptor at sector {}", sector); }
+                    if verbose {
+                        eprintln!("  Found Joliet Volume Descriptor at sector {}", sector);
+                    }
                     joliet_vd = Some(buffer);
                 }
             }
             255 => {
-                if verbose { eprintln!("  Volume Descriptor Set Terminator at sector {}", sector); }
+                if verbose {
+                    eprintln!("  Volume Descriptor Set Terminator at sector {}", sector);
+                }
                 break;
             }
             _ => {}
@@ -83,13 +105,24 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
     };
 
     if verbose {
-        eprintln!("  Using {} Volume Descriptor",
-            if vd_type == VolumeDescriptorType::Joliet { "Joliet" } else { "Primary" });
+        eprintln!(
+            "  Using {} Volume Descriptor",
+            if vd_type == VolumeDescriptorType::Joliet {
+                "Joliet"
+            } else {
+                "Primary"
+            }
+        );
     }
 
     // Parse root directory record (starts at offset 156)
     let root_record = parse_directory_record(&buffer[156..], vd_type)?;
-    if verbose { eprintln!("  Root directory at sector {}, size {} bytes", root_record.extent_location, root_record.data_length); }
+    if verbose {
+        eprintln!(
+            "  Root directory at sector {}, size {} bytes",
+            root_record.extent_location, root_record.data_length
+        );
+    }
 
     // Check for Rock Ridge (we'll detect it when parsing the root directory)
     let mut root_node = TreeNode::new_directory("/".to_string());
@@ -98,16 +131,27 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
     } else {
         false
     };
-    if verbose && use_rock_ridge { eprintln!("  Rock Ridge extensions detected"); }
+    if verbose && use_rock_ridge {
+        eprintln!("  Rock Ridge extensions detected");
+    }
 
-    parse_directory(file, &root_record, &mut root_node, vd_type, use_rock_ridge, verbose)?;
+    parse_directory(
+        file,
+        &root_record,
+        &mut root_node,
+        vd_type,
+        use_rock_ridge,
+        verbose,
+    )?;
 
     root_node.calculate_directory_size();
     Ok(root_node)
 }
 
 fn detect_rock_ridge(file: &mut File, dir_record: &DirectoryRecord) -> Result<bool> {
-    file.seek(SeekFrom::Start(dir_record.extent_location as u64 * SECTOR_SIZE))?;
+    file.seek(SeekFrom::Start(
+        dir_record.extent_location as u64 * SECTOR_SIZE,
+    ))?;
     let mut buffer = vec![0u8; dir_record.data_length.min(4096) as usize];
     file.read_exact(&mut buffer)?;
 
@@ -155,11 +199,13 @@ fn parse_directory_record(data: &[u8], vd_type: VolumeDescriptorType) -> Result<
 
     let is_directory = (file_flags & 0x02) != 0;
 
-    let filename = if filename_length == 0 {
-        ".".to_string()
-    } else if filename_length == 1 && data[33] == 0 {
+    let filename = if filename_length == 0 || (filename_length == 1 && data[33] == 0) {
+        // ECMA-119 7.6.12: a single 0x00 byte is the special "." (current)
+        // directory entry; an empty filename is also treated as "." here.
         ".".to_string()
     } else if filename_length == 1 && data[33] == 1 {
+        // ECMA-119 7.6.12: a single 0x01 byte is the special ".." (parent)
+        // directory entry.
         "..".to_string()
     } else if vd_type == VolumeDescriptorType::Joliet {
         // Joliet uses UCS-2 big-endian encoding
@@ -193,7 +239,11 @@ fn parse_directory_record(data: &[u8], vd_type: VolumeDescriptorType) -> Result<
     })
 }
 
-fn extract_rock_ridge_name(data: &[u8], record_length: usize, filename_length: usize) -> Option<String> {
+fn extract_rock_ridge_name(
+    data: &[u8],
+    record_length: usize,
+    filename_length: usize,
+) -> Option<String> {
     // System use area starts after the filename + padding byte for even alignment
     let su_start = 33 + filename_length + ((filename_length + 1) % 2);
     if su_start >= record_length {
@@ -234,13 +284,21 @@ fn extract_rock_ridge_name(data: &[u8], record_length: usize, filename_length: u
     }
 }
 
-fn parse_directory(file: &mut File, dir_record: &DirectoryRecord, parent_node: &mut TreeNode,
-                   vd_type: VolumeDescriptorType, use_rock_ridge: bool, verbose: bool) -> Result<()> {
+fn parse_directory(
+    file: &mut File,
+    dir_record: &DirectoryRecord,
+    parent_node: &mut TreeNode,
+    vd_type: VolumeDescriptorType,
+    use_rock_ridge: bool,
+    verbose: bool,
+) -> Result<()> {
     if !dir_record.is_directory || dir_record.data_length == 0 {
         return Ok(());
     }
 
-    file.seek(SeekFrom::Start(dir_record.extent_location as u64 * SECTOR_SIZE))?;
+    file.seek(SeekFrom::Start(
+        dir_record.extent_location as u64 * SECTOR_SIZE,
+    ))?;
 
     let mut buffer = vec![0u8; dir_record.data_length as usize];
     file.read_exact(&mut buffer)?;
@@ -265,28 +323,47 @@ fn parse_directory(file: &mut File, dir_record: &DirectoryRecord, parent_node: &
 
         if let Ok(mut record) = parse_directory_record(&buffer[offset..], vd_type) {
             // Try Rock Ridge alternate name
-            if use_rock_ridge && vd_type == VolumeDescriptorType::Primary
-                && record.filename != "." && record.filename != ".."
+            if use_rock_ridge
+                && vd_type == VolumeDescriptorType::Primary
+                && record.filename != "."
+                && record.filename != ".."
             {
                 let filename_length = buffer[offset + 32] as usize;
-                if let Some(rr_name) = extract_rock_ridge_name(&buffer[offset..offset + record_length], record_length, filename_length) {
+                if let Some(rr_name) = extract_rock_ridge_name(
+                    &buffer[offset..offset + record_length],
+                    record_length,
+                    filename_length,
+                ) {
                     record.filename = rr_name;
                 }
             }
 
             // Skip "." and ".." entries
             if record.filename != "." && record.filename != ".." {
-                if verbose { eprintln!("    Found {}: {}", if record.is_directory { "dir" } else { "file" }, record.filename); }
+                if verbose {
+                    eprintln!(
+                        "    Found {}: {}",
+                        if record.is_directory { "dir" } else { "file" },
+                        record.filename
+                    );
+                }
                 if record.is_directory {
                     let mut dir_node = TreeNode::new_directory(record.filename.clone());
-                    parse_directory(file, &record, &mut dir_node, vd_type, use_rock_ridge, verbose)?;
+                    parse_directory(
+                        file,
+                        &record,
+                        &mut dir_node,
+                        vd_type,
+                        use_rock_ridge,
+                        verbose,
+                    )?;
                     parent_node.add_child(dir_node);
                 } else {
                     let file_node = TreeNode::new_file_with_location(
                         record.filename.clone(),
                         record.data_length as u64,
                         record.extent_location as u64 * SECTOR_SIZE,
-                        record.data_length as u64
+                        record.data_length as u64,
                     );
                     parent_node.add_child(file_node);
                 }

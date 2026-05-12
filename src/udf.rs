@@ -1,7 +1,13 @@
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+//! UDF (ECMA-167) parser. Supports metadata partitions and multi-extent
+//! files — enough for typical CD/DVD/Blu-ray media.
+//!
+//! The entry points are [`parse_udf`] and [`parse_udf_verbose`]. Both
+//! return a [`crate::TreeNode`] tree rooted at `"/"` on success.
+
+use crate::tree::TreeNode;
+use crate::Result;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use crate::tree::TreeNode;
 
 const SECTOR_SIZE: u64 = 2048;
 
@@ -55,14 +61,23 @@ fn read_long_ad(buffer: &[u8]) -> LongAd {
     }
 }
 
+/// Parse a UDF image, returning the root of the directory tree.
+///
+/// Equivalent to `parse_udf_verbose(file, false)`. Errors out cleanly
+/// (returns `Err`, never panics) on images whose anchor or partition
+/// descriptors don't validate.
 pub fn parse_udf(file: &mut File) -> Result<TreeNode> {
     parse_udf_verbose(file, false)
 }
 
+/// Like [`parse_udf`], but prints spec-section-tagged diagnostics to
+/// stderr while parsing. Useful for investigating images that fail.
 pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
     // Check for UDF markers in the Volume Recognition Sequence (sectors 16-31)
     let mut found_udf_marker = false;
-    if verbose { eprintln!("Scanning sectors 16-31 for UDF Volume Recognition Sequence..."); }
+    if verbose {
+        eprintln!("Scanning sectors 16-31 for UDF Volume Recognition Sequence...");
+    }
     for sector in 16..32 {
         if file.seek(SeekFrom::Start(sector * SECTOR_SIZE)).is_err() {
             continue;
@@ -74,7 +89,13 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
 
         let id = &buffer[1..6];
         if id == b"NSR02" || id == b"NSR03" || id == b"BEA01" || id == b"TEA01" {
-            if verbose { eprintln!("  Found UDF marker '{:?}' at sector {}", String::from_utf8_lossy(id), sector); }
+            if verbose {
+                eprintln!(
+                    "  Found UDF marker '{:?}' at sector {}",
+                    String::from_utf8_lossy(id),
+                    sector
+                );
+            }
             found_udf_marker = true;
             break;
         }
@@ -85,19 +106,28 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
     }
 
     // Try to find the Anchor Volume Descriptor Pointer (AVDP) at sector 256
-    if verbose { eprintln!("Looking for Anchor Volume Descriptor Pointer at sector 256..."); }
+    if verbose {
+        eprintln!("Looking for Anchor Volume Descriptor Pointer at sector 256...");
+    }
     file.seek(SeekFrom::Start(256 * SECTOR_SIZE))?;
     let mut avdp_buffer = [0u8; 512];
     file.read_exact(&mut avdp_buffer)?;
 
     let tag_id = u16::from_le_bytes([avdp_buffer[0], avdp_buffer[1]]);
     if tag_id != 2 {
-        if verbose { eprintln!("  AVDP not found at sector 256 (tag id: {})", tag_id); }
+        if verbose {
+            eprintln!("  AVDP not found at sector 256 (tag id: {})", tag_id);
+        }
         return Err("UDF detected but AVDP not found at sector 256.".into());
     }
 
     let main_vds_extent = read_extent_ad(&avdp_buffer[16..24]);
-    if verbose { eprintln!("  Found AVDP. Main VDS at sector {}, length {}", main_vds_extent.location, main_vds_extent.length); }
+    if verbose {
+        eprintln!(
+            "  Found AVDP. Main VDS at sector {}, length {}",
+            main_vds_extent.location, main_vds_extent.length
+        );
+    }
 
     // Collect partition info and parse LVD
     let mut partitions: Vec<PartitionInfo> = Vec::new();
@@ -105,9 +135,14 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
     let mut metadata_partition: Option<MetadataPartitionInfo> = None;
 
     let mut sector = main_vds_extent.location as u64;
-    let end_sector = sector + (main_vds_extent.length as u64 + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    let end_sector = sector + (main_vds_extent.length as u64).div_ceil(SECTOR_SIZE);
 
-    if verbose { eprintln!("Parsing Main Volume Descriptor Sequence (sectors {} to {})...", sector, end_sector); }
+    if verbose {
+        eprintln!(
+            "Parsing Main Volume Descriptor Sequence (sectors {} to {})...",
+            sector, end_sector
+        );
+    }
     while sector < end_sector {
         file.seek(SeekFrom::Start(sector * SECTOR_SIZE))?;
         let mut vds_buffer = vec![0u8; SECTOR_SIZE as usize];
@@ -116,52 +151,111 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
         let vds_tag_id = u16::from_le_bytes([vds_buffer[0], vds_buffer[1]]);
 
         match vds_tag_id {
-            5 => { // Partition Descriptor
+            5 => {
+                // Partition Descriptor
                 let part_num = u16::from_le_bytes([vds_buffer[22], vds_buffer[23]]);
-                let part_start = u32::from_le_bytes([vds_buffer[188], vds_buffer[189], vds_buffer[190], vds_buffer[191]]) as u64;
-                if verbose { eprintln!("  Found Partition Descriptor #{}: starts at sector {}", part_num, part_start); }
-                partitions.push(PartitionInfo { number: part_num, start_sector: part_start });
+                let part_start = u32::from_le_bytes([
+                    vds_buffer[188],
+                    vds_buffer[189],
+                    vds_buffer[190],
+                    vds_buffer[191],
+                ]) as u64;
+                if verbose {
+                    eprintln!(
+                        "  Found Partition Descriptor #{}: starts at sector {}",
+                        part_num, part_start
+                    );
+                }
+                partitions.push(PartitionInfo {
+                    number: part_num,
+                    start_sector: part_start,
+                });
             }
-            6 => { // Logical Volume Descriptor
+            6 => {
+                // Logical Volume Descriptor
                 // FSD location at offset 248
                 root_fsd_long_ad = Some(read_long_ad(&vds_buffer[248..264]));
                 if verbose {
                     let ad = root_fsd_long_ad.unwrap();
-                    eprintln!("  Found Logical Volume Descriptor. FSD at location {} in partition {}", ad.location, ad.partition);
+                    eprintln!(
+                        "  Found Logical Volume Descriptor. FSD at location {} in partition {}",
+                        ad.location, ad.partition
+                    );
                 }
 
                 // Parse partition maps to find metadata partition
-                let map_table_length = u32::from_le_bytes([vds_buffer[264], vds_buffer[265], vds_buffer[266], vds_buffer[267]]) as usize;
-                let num_partition_maps = u32::from_le_bytes([vds_buffer[268], vds_buffer[269], vds_buffer[270], vds_buffer[271]]);
-                if verbose { eprintln!("    {} partition maps, table length {} bytes", num_partition_maps, map_table_length); }
+                let map_table_length = u32::from_le_bytes([
+                    vds_buffer[264],
+                    vds_buffer[265],
+                    vds_buffer[266],
+                    vds_buffer[267],
+                ]) as usize;
+                let num_partition_maps = u32::from_le_bytes([
+                    vds_buffer[268],
+                    vds_buffer[269],
+                    vds_buffer[270],
+                    vds_buffer[271],
+                ]);
+                if verbose {
+                    eprintln!(
+                        "    {} partition maps, table length {} bytes",
+                        num_partition_maps, map_table_length
+                    );
+                }
 
                 // Partition maps start at offset 440
                 let mut map_offset = 440usize;
                 for map_idx in 0..num_partition_maps {
-                    if map_offset + 2 > vds_buffer.len() { break; }
+                    if map_offset + 2 > vds_buffer.len() {
+                        break;
+                    }
                     let map_type = vds_buffer[map_offset];
                     let map_length = vds_buffer[map_offset + 1] as usize;
-                    if map_length == 0 { break; } // malformed map: avoid infinite loop
+                    if map_length == 0 {
+                        break;
+                    } // malformed map: avoid infinite loop
 
-                    if verbose { eprintln!("    Partition map {}: type {}, length {}", map_idx, map_type, map_length); }
+                    if verbose {
+                        eprintln!(
+                            "    Partition map {}: type {}, length {}",
+                            map_idx, map_type, map_length
+                        );
+                    }
 
                     if map_type == 2 && map_length >= 64 {
                         let id_string = &vds_buffer[map_offset + 5..map_offset + 28];
 
                         if verbose {
-                            let id_printable: String = id_string.iter()
+                            let id_printable: String = id_string
+                                .iter()
                                 .take_while(|&&b| b != 0)
-                                .map(|&b| if b >= 0x20 && b < 0x7f { b as char } else { '.' })
+                                .map(|&b| {
+                                    if (0x20..0x7f).contains(&b) {
+                                        b as char
+                                    } else {
+                                        '.'
+                                    }
+                                })
                                 .collect();
                             eprintln!("      Type 2 identifier: '{}'", id_printable);
                         }
 
                         if id_string.starts_with(b"*UDF Metadata Partition") {
-                            let meta_part_ref = u16::from_le_bytes([vds_buffer[map_offset + 38], vds_buffer[map_offset + 39]]);
-                            let meta_file_loc = u32::from_le_bytes([vds_buffer[map_offset + 40], vds_buffer[map_offset + 41],
-                                                                    vds_buffer[map_offset + 42], vds_buffer[map_offset + 43]]);
+                            let meta_part_ref = u16::from_le_bytes([
+                                vds_buffer[map_offset + 38],
+                                vds_buffer[map_offset + 39],
+                            ]);
+                            let meta_file_loc = u32::from_le_bytes([
+                                vds_buffer[map_offset + 40],
+                                vds_buffer[map_offset + 41],
+                                vds_buffer[map_offset + 42],
+                                vds_buffer[map_offset + 43],
+                            ]);
                             if verbose {
-                                eprintln!("      Metadata Partition: file at location {} in partition {}", meta_file_loc, meta_part_ref);
+                                eprintln!(
+                                    "      Metadata Partition: file at location {} in partition {}",
+                                    meta_file_loc, meta_part_ref
+                                );
                             }
                             metadata_partition = Some(MetadataPartitionInfo {
                                 file_location: meta_file_loc,
@@ -174,7 +268,9 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
                 }
             }
             8 => {
-                if verbose { eprintln!("  Found Terminating Descriptor at sector {}", sector); }
+                if verbose {
+                    eprintln!("  Found Terminating Descriptor at sector {}", sector);
+                }
                 break;
             }
             _ => {}
@@ -182,79 +278,131 @@ pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
         sector += 1;
     }
 
-    let fsd_long_ad = root_fsd_long_ad.ok_or("Failed to find File Set Descriptor location in LVD")?;
+    let fsd_long_ad =
+        root_fsd_long_ad.ok_or("Failed to find File Set Descriptor location in LVD")?;
 
     // Find the partition that the FSD references
     let fsd_partition_ref = fsd_long_ad.partition;
 
     // Determine where to read the FSD from
     let (fsd_sector, partition_start) = if let Some(ref meta_info) = metadata_partition {
-        if verbose { eprintln!("FSD is in metadata partition, reading via metadata file..."); }
+        if verbose {
+            eprintln!("FSD is in metadata partition, reading via metadata file...");
+        }
 
-        let meta_phys_partition = partitions.iter()
+        let meta_phys_partition = partitions
+            .iter()
             .find(|p| p.number == meta_info.partition_ref)
             .ok_or("Cannot find physical partition for metadata file")?;
 
         let meta_fe_sector = meta_phys_partition.start_sector + meta_info.file_location as u64;
-        if verbose { eprintln!("  Metadata File Entry at sector {}", meta_fe_sector); }
+        if verbose {
+            eprintln!("  Metadata File Entry at sector {}", meta_fe_sector);
+        }
 
         file.seek(SeekFrom::Start(meta_fe_sector * SECTOR_SIZE))?;
         let mut meta_fe_buffer = vec![0u8; SECTOR_SIZE as usize];
         file.read_exact(&mut meta_fe_buffer)?;
 
         let meta_tag_id = u16::from_le_bytes([meta_fe_buffer[0], meta_fe_buffer[1]]);
-        if verbose { eprintln!("  Metadata FE tag: {}", meta_tag_id); }
+        if verbose {
+            eprintln!("  Metadata FE tag: {}", meta_tag_id);
+        }
 
         // Read first extent of metadata file
         let meta_alloc = get_file_allocation(&meta_fe_buffer)?;
-        let first_extent = meta_alloc.extents.first()
+        let first_extent = meta_alloc
+            .extents
+            .first()
             .ok_or("Metadata file has no allocation extents")?;
 
-        if verbose { eprintln!("  Metadata file extent: location {}, length {}", first_extent.location, first_extent.length); }
+        if verbose {
+            eprintln!(
+                "  Metadata file extent: location {}, length {}",
+                first_extent.location, first_extent.length
+            );
+        }
 
         let metadata_data_sector = meta_phys_partition.start_sector + first_extent.location as u64;
         let fsd_offset_in_metadata = fsd_long_ad.location as u64;
 
-        (metadata_data_sector + fsd_offset_in_metadata, metadata_data_sector)
+        (
+            metadata_data_sector + fsd_offset_in_metadata,
+            metadata_data_sector,
+        )
     } else {
-        let partition = partitions.iter()
+        let partition = partitions
+            .iter()
             .find(|p| p.number == fsd_partition_ref)
             .or_else(|| partitions.first())
             .ok_or("No partition found")?;
 
-        (partition.start_sector + fsd_long_ad.location as u64, partition.start_sector)
+        (
+            partition.start_sector + fsd_long_ad.location as u64,
+            partition.start_sector,
+        )
     };
 
-    if verbose { eprintln!("Reading File Set Descriptor at sector {}...", fsd_sector); }
+    if verbose {
+        eprintln!("Reading File Set Descriptor at sector {}...", fsd_sector);
+    }
     file.seek(SeekFrom::Start(fsd_sector * SECTOR_SIZE))?;
     let mut fsd_buffer = [0u8; 512];
     file.read_exact(&mut fsd_buffer)?;
 
     let fsd_tag_id = u16::from_le_bytes([fsd_buffer[0], fsd_buffer[1]]);
     if fsd_tag_id != 256 {
-        if verbose { eprintln!("  Tag {} at expected FSD location, scanning nearby...", fsd_tag_id); }
+        if verbose {
+            eprintln!(
+                "  Tag {} at expected FSD location, scanning nearby...",
+                fsd_tag_id
+            );
+        }
         let mut found_fsd = false;
         for offset in 1..32 {
             file.seek(SeekFrom::Start((fsd_sector + offset) * SECTOR_SIZE))?;
             file.read_exact(&mut fsd_buffer)?;
             let tag = u16::from_le_bytes([fsd_buffer[0], fsd_buffer[1]]);
             if tag == 256 {
-                if verbose { eprintln!("  Found FSD at sector {} (offset +{})", fsd_sector + offset, offset); }
+                if verbose {
+                    eprintln!(
+                        "  Found FSD at sector {} (offset +{})",
+                        fsd_sector + offset,
+                        offset
+                    );
+                }
                 found_fsd = true;
                 break;
             }
         }
         if !found_fsd {
-            return Err(format!("Invalid File Set Descriptor tag: expected 256, found {}", fsd_tag_id).into());
+            return Err(format!(
+                "Invalid File Set Descriptor tag: expected 256, found {}",
+                fsd_tag_id
+            )
+            .into());
         }
     }
 
     let root_icb_long_ad = read_long_ad(&fsd_buffer[400..416]);
-    if verbose { eprintln!("  Found FSD. Root ICB at location {} in partition {}", root_icb_long_ad.location, root_icb_long_ad.partition); }
+    if verbose {
+        eprintln!(
+            "  Found FSD. Root ICB at location {} in partition {}",
+            root_icb_long_ad.location, root_icb_long_ad.partition
+        );
+    }
 
     let mut root_node = TreeNode::new_directory("/".to_string());
-    if verbose { eprintln!("Parsing root directory..."); }
-    parse_directory(file, partition_start, &root_icb_long_ad, &mut root_node, verbose)?;
+    if verbose {
+        eprintln!("Parsing root directory...");
+    }
+    parse_directory(
+        file,
+        partition_start,
+        &root_icb_long_ad,
+        &mut root_node,
+        verbose,
+    )?;
 
     root_node.calculate_directory_size();
     Ok(root_node)
@@ -275,13 +423,17 @@ fn get_file_allocation(fe_buffer: &[u8]) -> Result<FileAllocation> {
     let ad_type = icb_flags & 0x07;
 
     let ea_length = u32::from_le_bytes([
-        fe_buffer[ea_length_offset], fe_buffer[ea_length_offset + 1],
-        fe_buffer[ea_length_offset + 2], fe_buffer[ea_length_offset + 3],
+        fe_buffer[ea_length_offset],
+        fe_buffer[ea_length_offset + 1],
+        fe_buffer[ea_length_offset + 2],
+        fe_buffer[ea_length_offset + 3],
     ]) as usize;
 
     let ad_length = u32::from_le_bytes([
-        fe_buffer[ad_length_offset], fe_buffer[ad_length_offset + 1],
-        fe_buffer[ad_length_offset + 2], fe_buffer[ad_length_offset + 3],
+        fe_buffer[ad_length_offset],
+        fe_buffer[ad_length_offset + 1],
+        fe_buffer[ad_length_offset + 2],
+        fe_buffer[ad_length_offset + 3],
     ]) as usize;
 
     let ad_offset = ad_data_offset_base + ea_length;
@@ -295,13 +447,27 @@ fn get_file_allocation(fe_buffer: &[u8]) -> Result<FileAllocation> {
             // Short Allocation Descriptors (8 bytes each: length[4] + position[4])
             let mut pos = ad_offset;
             while pos + 8 <= fe_buffer.len() && pos < ad_offset + ad_length {
-                let raw_length = u32::from_le_bytes([fe_buffer[pos], fe_buffer[pos+1], fe_buffer[pos+2], fe_buffer[pos+3]]);
+                let raw_length = u32::from_le_bytes([
+                    fe_buffer[pos],
+                    fe_buffer[pos + 1],
+                    fe_buffer[pos + 2],
+                    fe_buffer[pos + 3],
+                ]);
                 let extent_type = raw_length >> 30;
                 let length = raw_length & 0x3FFFFFFF;
-                let location = u32::from_le_bytes([fe_buffer[pos+4], fe_buffer[pos+5], fe_buffer[pos+6], fe_buffer[pos+7]]);
+                let location = u32::from_le_bytes([
+                    fe_buffer[pos + 4],
+                    fe_buffer[pos + 5],
+                    fe_buffer[pos + 6],
+                    fe_buffer[pos + 7],
+                ]);
 
-                if length == 0 { break; }
-                if extent_type == 3 { break; } // Next extent of allocation descriptors — not yet supported
+                if length == 0 {
+                    break;
+                }
+                if extent_type == 3 {
+                    break;
+                } // Next extent of allocation descriptors — not yet supported
 
                 // Type 0 = recorded and allocated, Type 1 = allocated but not recorded (sparse)
                 if extent_type == 0 {
@@ -315,13 +481,27 @@ fn get_file_allocation(fe_buffer: &[u8]) -> Result<FileAllocation> {
             // Long Allocation Descriptors (16 bytes each)
             let mut pos = ad_offset;
             while pos + 16 <= fe_buffer.len() && pos < ad_offset + ad_length {
-                let raw_length = u32::from_le_bytes([fe_buffer[pos], fe_buffer[pos+1], fe_buffer[pos+2], fe_buffer[pos+3]]);
+                let raw_length = u32::from_le_bytes([
+                    fe_buffer[pos],
+                    fe_buffer[pos + 1],
+                    fe_buffer[pos + 2],
+                    fe_buffer[pos + 3],
+                ]);
                 let extent_type = raw_length >> 30;
                 let length = raw_length & 0x3FFFFFFF;
-                let location = u32::from_le_bytes([fe_buffer[pos+4], fe_buffer[pos+5], fe_buffer[pos+6], fe_buffer[pos+7]]);
+                let location = u32::from_le_bytes([
+                    fe_buffer[pos + 4],
+                    fe_buffer[pos + 5],
+                    fe_buffer[pos + 6],
+                    fe_buffer[pos + 7],
+                ]);
 
-                if length == 0 { break; }
-                if extent_type == 3 { break; }
+                if length == 0 {
+                    break;
+                }
+                if extent_type == 3 {
+                    break;
+                }
 
                 if extent_type == 0 {
                     extents.push(ExtentAd { length, location });
@@ -354,12 +534,24 @@ fn get_file_allocation(fe_buffer: &[u8]) -> Result<FileAllocation> {
         return Err("No allocation extents found in file entry".into());
     }
 
-    Ok(FileAllocation { extents, total_length, inline_data })
+    Ok(FileAllocation {
+        extents,
+        total_length,
+        inline_data,
+    })
 }
 
-fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, parent_node: &mut TreeNode, verbose: bool) -> Result<()> {
+fn parse_directory(
+    file: &mut File,
+    partition_start: u64,
+    icb_long_ad: &LongAd,
+    parent_node: &mut TreeNode,
+    verbose: bool,
+) -> Result<()> {
     // Read the file entry to get allocation info
-    file.seek(SeekFrom::Start((partition_start + icb_long_ad.location as u64) * SECTOR_SIZE))?;
+    file.seek(SeekFrom::Start(
+        (partition_start + icb_long_ad.location as u64) * SECTOR_SIZE,
+    ))?;
     let mut fe_buffer = vec![0u8; SECTOR_SIZE as usize];
     file.read_exact(&mut fe_buffer)?;
 
@@ -369,7 +561,11 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
         if alloc.inline_data.is_some() {
             eprintln!("  Directory has inline data, {} bytes", alloc.total_length);
         } else {
-            eprintln!("  Directory has {} extent(s), total {} bytes", alloc.extents.len(), alloc.total_length);
+            eprintln!(
+                "  Directory has {} extent(s), total {} bytes",
+                alloc.extents.len(),
+                alloc.total_length
+            );
         }
     }
 
@@ -379,7 +575,9 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
     } else {
         let mut buf = Vec::with_capacity(alloc.total_length as usize);
         for extent in &alloc.extents {
-            file.seek(SeekFrom::Start((partition_start + extent.location as u64) * SECTOR_SIZE))?;
+            file.seek(SeekFrom::Start(
+                (partition_start + extent.location as u64) * SECTOR_SIZE,
+            ))?;
             let mut chunk = vec![0u8; extent.length as usize];
             file.read_exact(&mut chunk)?;
             buf.extend_from_slice(&chunk);
@@ -389,16 +587,24 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
 
     let mut offset = 0;
     while offset < buffer.len() {
-        if offset + 40 > buffer.len() { break; }
+        if offset + 40 > buffer.len() {
+            break;
+        }
 
-        let tag_id = u16::from_le_bytes([buffer[offset], buffer[offset+1]]);
+        let tag_id = u16::from_le_bytes([buffer[offset], buffer[offset + 1]]);
         if tag_id == 0 {
             offset += 4;
             continue;
         }
 
-        if tag_id != 257 { // File Identifier Descriptor
-            if verbose { eprintln!("    Warning: Expected FID (257) at offset {}, found {}", offset, tag_id); }
+        if tag_id != 257 {
+            // File Identifier Descriptor
+            if verbose {
+                eprintln!(
+                    "    Warning: Expected FID (257) at offset {}, found {}",
+                    offset, tag_id
+                );
+            }
             break;
         }
 
@@ -409,8 +615,13 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
 
         let name_offset = offset + 38 + length_of_iu;
         if name_offset + length_of_fi > buffer.len() {
-             if verbose { eprintln!("    Warning: FID name offset out of bounds at offset {}", offset); }
-             break;
+            if verbose {
+                eprintln!(
+                    "    Warning: FID name offset out of bounds at offset {}",
+                    offset
+                );
+            }
+            break;
         }
 
         let name = if length_of_fi == 0 {
@@ -424,11 +635,20 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
         let is_parent = (file_characteristics & 0x08) != 0;
 
         if !is_deleted && !is_parent && !name.is_empty() {
-            if verbose { eprintln!("    Found {}: {}", if is_directory { "dir" } else { "file" }, name); }
+            if verbose {
+                eprintln!(
+                    "    Found {}: {}",
+                    if is_directory { "dir" } else { "file" },
+                    name
+                );
+            }
             if is_directory {
                 let mut dir_node = TreeNode::new_directory(name);
-                if let Err(e) = parse_directory(file, partition_start, &icb, &mut dir_node, verbose) {
-                    if verbose { eprintln!("      Warning: Failed to parse subdirectory: {}", e); }
+                if let Err(e) = parse_directory(file, partition_start, &icb, &mut dir_node, verbose)
+                {
+                    if verbose {
+                        eprintln!("      Warning: Failed to parse subdirectory: {}", e);
+                    }
                 }
                 parent_node.add_child(dir_node);
             } else {
@@ -440,7 +660,7 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
                                 name,
                                 alloc.total_length,
                                 (partition_start + first.location as u64) * SECTOR_SIZE,
-                                alloc.total_length
+                                alloc.total_length,
                             )
                         } else {
                             // Inline data (ad_type 3): size known but no extent location
@@ -449,7 +669,9 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
                         parent_node.add_child(file_node);
                     }
                     Err(e) => {
-                        if verbose { eprintln!("      Warning: Failed to get file extent: {}", e); }
+                        if verbose {
+                            eprintln!("      Warning: Failed to get file extent: {}", e);
+                        }
                         let file_node = TreeNode::new_file(name, 0);
                         parent_node.add_child(file_node);
                     }
@@ -465,8 +687,14 @@ fn parse_directory(file: &mut File, partition_start: u64, icb_long_ad: &LongAd, 
     Ok(())
 }
 
-fn get_file_info(file: &mut File, partition_start: u64, icb_long_ad: &LongAd) -> Result<FileAllocation> {
-    file.seek(SeekFrom::Start((partition_start + icb_long_ad.location as u64) * SECTOR_SIZE))?;
+fn get_file_info(
+    file: &mut File,
+    partition_start: u64,
+    icb_long_ad: &LongAd,
+) -> Result<FileAllocation> {
+    file.seek(SeekFrom::Start(
+        (partition_start + icb_long_ad.location as u64) * SECTOR_SIZE,
+    ))?;
     let mut fe_buffer = vec![0u8; SECTOR_SIZE as usize];
     file.read_exact(&mut fe_buffer)?;
 
@@ -474,7 +702,9 @@ fn get_file_info(file: &mut File, partition_start: u64, icb_long_ad: &LongAd) ->
 }
 
 fn parse_udf_name(data: &[u8]) -> String {
-    if data.is_empty() { return String::new(); }
+    if data.is_empty() {
+        return String::new();
+    }
 
     let compression_id = data[0];
     if compression_id == 8 {
