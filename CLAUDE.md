@@ -1,8 +1,12 @@
 # Working in isomage
 
-This repository is a **pure-Rust library** for reading ISO 9660 and
-UDF disc images. There is no CLI binary, no Homebrew tap, no
-distributed executable — the only artifact is the crate on
+This repository is a **pure-Rust library** for reading and (as of
+v3.0) writing disc and disk images. The matrix is broader than the
+name suggests — ISO 9660 and UDF remain the centerpiece, but the
+crate is the umbrella for raw IMG / partition tables / VHD / VHDX /
+VMDK / QCOW2 / WIM / DMG / FAT / exFAT / NTFS / ext / HFS+ /
+SquashFS / APFS support. There is no CLI binary, no Homebrew tap,
+no distributed executable — the only artifact is the crate on
 crates.io and its rustdoc on docs.rs.
 
 ## Hard rules, read first
@@ -13,10 +17,14 @@ crates.io and its rustdoc on docs.rs.
    request. The `prompt-log` job in `.github/workflows/ci.yml`
    fails the PR otherwise. Treat it the same as "tests must pass."
 
-2. **No new dependencies without justification.** The crate is
-   zero-runtime-dep on purpose (invariant 7 in README.md). Adding
-   a `[dependencies]` entry requires the PR description to explain
-   why `std` won't do.
+2. **No runtime deps in `default` features.** `cargo build` with
+   the default feature set still pulls zero runtime crates. New
+   deps are allowed *only* behind a non-default cargo feature
+   (`mmap`, `simd`, codec features like `deflate-gzippy`/`lzma`/
+   `zstd`/`bzip2`/`lz4`, or a format feature). Adding a dep — even
+   behind a feature — requires the PR description to explain why
+   the format / perf path can't be done without it. See the
+   v3-scope-expansion prompt log for the rationale.
 
 3. **No CLI, no binary.** Don't reintroduce `[[bin]]` in
    `Cargo.toml` or `src/main.rs`. The project explicitly does not
@@ -24,8 +32,21 @@ crates.io and its rustdoc on docs.rs.
    wrap the public API themselves (see README's "If you want a CLI"
    section). Pre-2.0 versions did ship one; do not bring it back.
 
-4. **No `unsafe`.** The parsers are safe Rust end to end. New code
-   shouldn't change that without a discussion in the PR.
+4. **`unsafe` only behind a feature, only in hot paths.** Default-
+   feature builds remain 100% safe Rust. `unsafe` is permitted
+   inside the `mmap` and `simd` modules (and nowhere else),
+   contained to small blocks, and exercised by Miri in CI before
+   release. Every `unsafe` block carries a `// SAFETY:` comment.
+
+5. **Never write to the *input* image.** Write APIs create *new*
+   images; the reader path is read-only forever. Write APIs are
+   gated behind `--features write` until fsck-clean validation
+   lands per format.
+
+6. **Fsck-clean writes.** Any new write target must round-trip
+   against the matching reference tool (`mkisofs -check-session`,
+   `fsck.vfat`, `qemu-img check`, etc.) in CI before merging.
+   Untested write code stays behind `#[cfg(feature = "experimental")]`.
 
 ## How to add a prompt log correctly
 
@@ -73,16 +94,24 @@ Do not routinely skip the hook.
 ## Project facts
 
 - **Type**: pure-Rust library crate (`[lib]` only).
-- **Public API**: `detect_and_parse_filesystem`,
+- **Public API (v2.x, still current)**: `detect_and_parse_filesystem`,
   `detect_and_parse_filesystem_verbose`, `cat_node`, `extract_node`,
   `TreeNode`, plus the `iso9660` and `udf` submodules and the
   `Error` / `Result` type aliases. All documented; all on
   [docs.rs/isomage](https://docs.rs/isomage).
+- **Public API (v3.0, pending)**: adds a unified `Image::open` /
+  `Image::create` facade, the `RandomAccess` trait, `MmapImage`,
+  and a per-format submodule under `src/formats/`. `TreeNode.name`
+  becomes `Cow<'_, str>` (breaking).
 - **Layout**:
   - `src/lib.rs` — public API + crate-level rustdoc.
   - `src/iso9660.rs` — ISO 9660 (with Joliet, Rock Ridge) parser.
   - `src/udf.rs` — UDF parser (incl. metadata partitions, multi-extent files).
   - `src/tree.rs` — `TreeNode`, the wire format between parsers and consumers.
+  - `src/io/` — IO traits and `MmapImage` (added v3.0, `mmap` feature).
+  - `src/simd/` — SIMD CRC routines (added v3.0, `simd` feature).
+  - `src/formats/` — one submodule per supported image/filesystem
+    format (added v3.0, each behind its own feature).
 - **Tests** live as `#[cfg(test)] mod tests` inline in `src/lib.rs`.
   Doc-tests in `src/lib.rs` and `src/tree.rs` cover the README
   examples. There is no top-level `tests/` directory. Generated
@@ -106,8 +135,10 @@ Do not routinely skip the hook.
 - Verbose / progress / error output goes to **stderr**. Functions
   that take a writer (`cat_node`) write *only* file bytes to it —
   no headers, no framing, no progress text.
-- Read-only by design. Don't add ISO-writing features without an
-  open issue and a prompt-log entry explaining the decision.
+- Read-only on the *input* path, always. Write APIs are additive,
+  gated behind `--features write`, and must round-trip against a
+  reference tool. See `prompts/20260512-193754-v3-scope-expansion.md`
+  for the v3.0 rationale.
 - Names matter at the publish boundary. Re-renaming a `pub` item is
   a breaking change; deprecate first, then rename in a major
   release.

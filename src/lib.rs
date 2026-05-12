@@ -49,6 +49,22 @@ pub mod iso9660;
 pub mod tree;
 pub mod udf;
 
+// v3.0 infrastructure. The `image_io` module is always compiled
+// (the `RandomAccess` trait is free of unsafe and free of deps);
+// only the `MmapImage` submodule is gated behind the `mmap`
+// feature. The module is named `image_io` rather than `io` to
+// avoid colliding with `std::io`, which lib.rs imports unqualified.
+pub mod image_io;
+
+#[cfg(feature = "simd")]
+pub mod simd;
+
+// v3.0 format submodules. Each is feature-gated; the umbrella
+// `formats` module is always compiled (its body is just `pub mod`
+// declarations) so consumers can spell `isomage::formats::mbr`
+// without conditional imports.
+pub mod formats;
+
 pub use tree::TreeNode;
 
 use std::fs::{create_dir_all, File};
