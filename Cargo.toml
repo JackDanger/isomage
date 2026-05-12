@@ -86,13 +86,27 @@ experimental = []
 memmap2 = { version = "0.9", optional = true }
 
 [dev-dependencies]
-# criterion is dev-only — it never leaks to downstream users via
-# Cargo.toml. Bench harness lives in benches/, see seqread.rs.
+# Dev-deps never leak to downstream users via Cargo.toml. Bench
+# harness lives in benches/seqread.rs; the round-trip test harness
+# in tests/common/ uses tempfile for RAII tempdir cleanup.
 criterion = "0.5"
+tempfile = "3"
 
 [[bench]]
 name = "seqread"
 harness = false
+
+# Per-format round-trip tests are gated on their format feature so
+# `cargo test --no-default-features --features iso,udf` doesn't try
+# to compile e.g. tests/mbr_round_trip.rs (which references
+# `isomage::formats::mbr`, only built under --features mbr).
+[[test]]
+name = "mbr_round_trip"
+required-features = ["mbr"]
+
+[[test]]
+name = "gpt_round_trip"
+required-features = ["gpt"]
 
 [profile.release]
 opt-level = 2

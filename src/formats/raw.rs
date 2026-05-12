@@ -103,7 +103,11 @@ mod tests {
 
     fn scratch(bytes: &[u8], tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("isomage-raw-test-{}-{}.bin", std::process::id(), tag));
+        let path = dir.join(format!(
+            "isomage-raw-test-{}-{}.bin",
+            std::process::id(),
+            tag
+        ));
         let mut f = File::create(&path).unwrap();
         f.write_all(bytes).unwrap();
         f.sync_all().unwrap();

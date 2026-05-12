@@ -66,7 +66,10 @@ impl std::fmt::Display for Error {
             Error::TooShort => write!(f, "image is shorter than the GPT header sector"),
             Error::BadSignature => write!(f, "GPT signature 'EFI PART' missing at LBA 1"),
             Error::UnsupportedEntrySize(n) => {
-                write!(f, "unsupported GPT partition-entry size: {n} (expected 128)")
+                write!(
+                    f,
+                    "unsupported GPT partition-entry size: {n} (expected 128)"
+                )
             }
             Error::Io(e) => write!(f, "GPT I/O error: {e}"),
         }

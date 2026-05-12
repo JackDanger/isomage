@@ -112,10 +112,19 @@ Do not routinely skip the hook.
   - `src/simd/` — SIMD CRC routines (added v3.0, `simd` feature).
   - `src/formats/` — one submodule per supported image/filesystem
     format (added v3.0, each behind its own feature).
-- **Tests** live as `#[cfg(test)] mod tests` inline in `src/lib.rs`.
-  Doc-tests in `src/lib.rs` and `src/tree.rs` cover the README
-  examples. There is no top-level `tests/` directory. Generated
-  test ISOs live under `test_data/` and are produced by `make test-data`.
+- **Tests**:
+  - **Unit tests** live as `#[cfg(test)] mod tests` inline in
+    `src/lib.rs` and each format submodule. Doc-tests in
+    `src/lib.rs` and `src/tree.rs` cover the README examples.
+  - **Integration / round-trip tests** live under `tests/`
+    (v3.0 addition). One file per format
+    (`tests/<format>_round_trip.rs`) plus the harness self-test
+    (`tests/harness_self_test.rs`). Shared infrastructure
+    (Tool detection, RoundTrip builder, assertions, snapshot
+    rendering) is in `tests/common/`.
+  - Generated test ISOs live under `test_data/` and are produced
+    by `make test-data`. The `tests/` tree is excluded from
+    crates.io publish via `Cargo.toml`'s `include = […]` allow-list.
 - **Build & test**: `cargo build`, `cargo test`. CI also runs
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   `cargo doc --no-deps` with `RUSTDOCFLAGS="-D warnings"`, an MSRV

@@ -239,7 +239,10 @@ mod tests {
         write_entry(&mut s, 3, 0x00, 0x82, 8192, 512);
         let parts = parse_sector(&s).unwrap();
         assert_eq!(parts.len(), 3);
-        assert_eq!(parts.iter().map(|p| p.index).collect::<Vec<_>>(), vec![0, 1, 3]);
+        assert_eq!(
+            parts.iter().map(|p| p.index).collect::<Vec<_>>(),
+            vec![0, 1, 3]
+        );
     }
 
     #[test]

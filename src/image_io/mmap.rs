@@ -153,9 +153,9 @@ impl RandomAccess for MmapImage {
         let end = off
             .checked_add(len)
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "offset overflow"))?;
-        self.mmap.get(off..end).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "read past image end")
-        })
+        self.mmap
+            .get(off..end)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "read past image end"))
     }
 }
 
@@ -170,7 +170,11 @@ mod tests {
         // per-test, distinct filenames keeps siblings from racing on
         // the same scratch file.
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("isomage-mmap-test-{}-{}.bin", std::process::id(), tag));
+        let path = dir.join(format!(
+            "isomage-mmap-test-{}-{}.bin",
+            std::process::id(),
+            tag
+        ));
         let mut f = File::create(&path).unwrap();
         f.write_all(bytes).unwrap();
         f.sync_all().unwrap();
@@ -202,7 +206,9 @@ mod tests {
     fn seek_before_start_rejected() {
         let path = scratch_image(b"abcd", "seek_before_start");
         let mut img = MmapImage::open(&path).unwrap();
-        let err = img.seek(SeekFrom::Start(0)).and_then(|_| img.seek(SeekFrom::Current(-1)));
+        let err = img
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| img.seek(SeekFrom::Current(-1)));
         assert!(err.is_err());
         std::fs::remove_file(&path).ok();
     }

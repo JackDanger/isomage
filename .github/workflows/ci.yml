@@ -43,6 +43,95 @@ jobs:
         run: cargo test --doc
 
   # ---------------------------------------------------------------------
+  # Reference-tool round-trip tests. Installs the partition-table,
+  # filesystem, and disk-image authoring tools that `tests/*_round_trip.rs`
+  # exercise, then runs them with ISOMAGE_REQUIRE_TOOLS=1 so a missing
+  # tool fails the test rather than skipping silently.
+  #
+  # The list of tools mirrors `tests/common/binaries.rs`. When a new
+  # format lands, both files get updated in the same PR.
+  # ---------------------------------------------------------------------
+  round-trip:
+    name: round-trip (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: round-trip-${{ matrix.os }}
+
+      - name: Install format tools (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            util-linux \
+            gdisk \
+            parted \
+            xorriso \
+            qemu-utils \
+            dosfstools \
+            exfatprogs \
+            squashfs-tools \
+            wimtools \
+            e2fsprogs \
+            mtools \
+            ntfs-3g \
+            p7zip-full
+
+      - name: Install format tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Most tools live in Homebrew. NTFS write tools and sfdisk
+          # aren't available on macOS — the matching round-trip tests
+          # skip there even with ISOMAGE_REQUIRE_MACOS_ONLY behaviour.
+          brew update >/dev/null
+          brew install \
+            gptfdisk \
+            xorriso \
+            qemu \
+            dosfstools \
+            exfatprogs \
+            squashfs \
+            wimlib \
+            e2fsprogs \
+            mtools \
+            sevenzip || true
+
+      - name: Build round-trip tests
+        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt --tests
+
+      - name: Run round-trip tests (Ubuntu strict)
+        if: runner.os == 'Linux'
+        env:
+          ISOMAGE_REQUIRE_TOOLS: "1"
+        # Restrict to *_round_trip binaries plus the harness self-test.
+        # Library unit-tests are covered by the `test` job above; running
+        # them again here is redundant.
+        run: |
+          for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
+            echo "=== $bin ==="
+            cargo test --features mmap,simd,raw,mbr,gpt --test "$bin"
+          done
+
+      - name: Run round-trip tests (macOS, non-strict)
+        if: runner.os == 'macOS'
+        # macOS doesn't ship sfdisk / mkntfs / debugfs even with brew;
+        # tests that need them skip rather than fail. The matching
+        # Ubuntu job above runs in strict mode so coverage is enforced
+        # on exactly one platform.
+        run: |
+          for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
+            echo "=== $bin ==="
+            cargo test --features mmap,simd,raw,mbr,gpt --test "$bin"
+          done
+
+  # ---------------------------------------------------------------------
   # Formatting must match `cargo fmt`.
   # ---------------------------------------------------------------------
   fmt:

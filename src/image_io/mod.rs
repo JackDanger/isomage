@@ -105,9 +105,9 @@ mod tests {
             let end = off
                 .checked_add(len)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "offset overflow"))?;
-            self.0.get(off..end).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "read past image end")
-            })
+            self.0
+                .get(off..end)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "read past image end"))
         }
     }
 

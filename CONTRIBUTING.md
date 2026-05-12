@@ -46,8 +46,8 @@ format, no "Assistant" section required if there wasn't one.
   bring an image it can't read and a test that proves the fix.
 - **Spec coverage**. Joliet, Rock Ridge, multi-extent files, metadata
   partitions, El Torito boot records — all in scope. New
-  filesystems (HFS+, exFAT, etc.) require a real use case first, but
-  not a no.
+  filesystems (HFS+, exFAT, etc.) are landing as v3.0 — see
+  [`HANDOFF.md`](HANDOFF.md) for the per-format task table.
 - **API polish**: better doc comments, clearer error messages, more
   doc-tests covering the README examples, type signatures that are
   easier to use from `anyhow` / `tokio` / threaded code.
@@ -56,9 +56,24 @@ format, no "Assistant" section required if there wasn't one.
 - **Documentation**, especially around the file formats — inline
   spec-section comments in the parser source are the style.
 
+## Round-trip tests for new formats
+
+When you add a parser under `src/formats/<name>.rs`, the same PR
+adds `tests/<name>_round_trip.rs`. The harness builds a real image
+with an external tool (`xorriso`, `qemu-img`, `mkfs.vfat`,
+`sgdisk`, …), parses it with `isomage`, and asserts the parsed
+tree matches what the tool wrote. See [`tests/README.md`](tests/README.md)
+for the template and the skip-or-fail conventions.
+
+The CI `round-trip` job installs every reference tool and runs
+the suite with `ISOMAGE_REQUIRE_TOOLS=1`, so a missing-tool skip
+becomes a hard failure on the canary platform.
+
 ## What's out of scope
 
-- **Writing to ISO images.** `isomage` is read-only by design.
+- **Writing to the *input* image.** `isomage` is read-only on the
+  input side, always. Write APIs introduced in v3.0 create *new*
+  images and live behind `--features write`.
 - **Mount-style integrations** (FUSE, kernel modules, virtual filesystems).
 - **Distributing a CLI executable.** v1.x shipped one; v2.0.0
   removed it. The maintainer is not distributing platform
@@ -67,12 +82,15 @@ format, no "Assistant" section required if there wasn't one.
   the previous behaviour in ~50 lines on top of the public API. A
   separate maintained CLI crate is welcome — under a different
   name.
-- **Adding runtime dependencies** without a real justification. The
-  crate is zero-dep on purpose (invariant 7 in the README); adding a
-  `[dependencies]` entry needs to explain in the PR why a stdlib
-  implementation won't work.
-- **Adding `unsafe`.** The parsers are safe end-to-end. Don't change
-  that without a discussion.
+- **Adding runtime dependencies in the *default* feature set.** The
+  crate is zero-dep on default-features (`cargo build` pulls nothing).
+  New deps are allowed behind a non-default cargo feature (one per
+  format, codec, or perf opt-in); the PR description still must
+  explain why `std` won't do.
+- **Adding `unsafe` outside the `mmap` and `simd` modules.** Default
+  feature builds remain 100% safe Rust. The two performance opt-ins
+  carry contained `unsafe` blocks, each with a `// SAFETY:` comment
+  and Miri coverage in CI.
 
 ## Questions
 

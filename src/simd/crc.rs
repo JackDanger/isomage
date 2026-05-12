@@ -110,7 +110,9 @@ mod tests {
             state ^= state << 5;
             bytes.push(state as u8);
         }
-        for len in [0usize, 1, 2, 3, 15, 16, 17, 63, 64, 65, 511, 512, 513, 4095, 4096] {
+        for len in [
+            0usize, 1, 2, 3, 15, 16, 17, 63, 64, 65, 511, 512, 513, 4095, 4096,
+        ] {
             assert_eq!(
                 crc16_ccitt(&bytes[..len]),
                 reference(&bytes[..len]),

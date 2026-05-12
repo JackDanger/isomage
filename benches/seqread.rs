@@ -39,9 +39,7 @@ use std::io::{self, copy};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use isomage::{detect_and_parse_filesystem, TreeNode};
 
@@ -62,8 +60,7 @@ fn walk(node: &TreeNode, file: &mut File, total: &mut u64) -> io::Result<()> {
         let mut sink = io::sink();
         // cat_node streams bytes — no allocation per file beyond
         // its internal sector buffer.
-        isomage::cat_node(file, node, &mut sink)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        isomage::cat_node(file, node, &mut sink).map_err(|e| io::Error::other(e.to_string()))?;
         *total = total.saturating_add(node.size);
     }
     for child in &node.children {
@@ -82,7 +79,10 @@ fn seven_zip_extract_to_null(image_path: &Path) -> io::Result<()> {
     } else if which("7z").is_some() {
         "7z"
     } else {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "7zz/7z not on PATH"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "7zz/7z not on PATH",
+        ));
     };
 
     // `x -so` writes extracted bytes to stdout. `-bd` disables the
@@ -171,27 +171,19 @@ fn bench_seqread(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(size));
 
-        group.bench_with_input(
-            BenchmarkId::new("isomage", &name),
-            img,
-            |b, path| {
-                b.iter(|| {
-                    let n = extract_all_to_sink(path).expect("isomage extract");
-                    black_box(n);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("isomage", &name), img, |b, path| {
+            b.iter(|| {
+                let n = extract_all_to_sink(path).expect("isomage extract");
+                black_box(n);
+            });
+        });
 
         if have_7z {
-            group.bench_with_input(
-                BenchmarkId::new("7zz", &name),
-                img,
-                |b, path| {
-                    b.iter(|| {
-                        seven_zip_extract_to_null(path).expect("7zz extract");
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new("7zz", &name), img, |b, path| {
+                b.iter(|| {
+                    seven_zip_extract_to_null(path).expect("7zz extract");
+                });
+            });
         }
     }
     group.finish();
