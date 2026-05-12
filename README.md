@@ -1,5 +1,11 @@
 # isomage
 
+[![Crates.io](https://img.shields.io/crates/v/isomage.svg)](https://crates.io/crates/isomage)
+[![docs.rs](https://img.shields.io/docsrs/isomage)](https://docs.rs/isomage)
+[![CI](https://github.com/JackDanger/isomage/actions/workflows/ci.yml/badge.svg)](https://github.com/JackDanger/isomage/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.74-blue)](Cargo.toml)
+
 Browse and extract files from ISO images without mounting them.
 
 No root. No FUSE. No mount points. Just read the bytes.
@@ -38,10 +44,13 @@ Extraction completed successfully.
 - [Usage](#usage)
 - [Output contract](#output-contract)
 - [Supported formats](#supported-formats)
+- [Use as a library](#use-as-a-library)
 - [Architecture](#architecture)
 - [Invariants and extension points](#invariants-and-extension-points)
 - [Build, test, release](#build-test-release)
+- [Security](#security)
 - [Contributing](#contributing)
+- [Changelog](#changelog)
 - [License](#license)
 
 ---
@@ -241,6 +250,60 @@ succeeds.
 
 ---
 
+## Use as a library
+
+The same crate that ships the `isomage` binary is also a published
+library on [crates.io](https://crates.io/crates/isomage). Both
+audiences install from the same tag — there is no separate `-cli`
+crate to keep in sync.
+
+```toml
+# Cargo.toml
+[dependencies]
+isomage = "1"
+```
+
+```rust
+use std::fs::File;
+use isomage::{detect_and_parse_filesystem, cat_node, extract_node};
+
+let mut file = File::open("disc.iso")?;
+let root = detect_and_parse_filesystem(&mut file, "disc.iso")?;
+
+// Walk the tree.
+for child in &root.children {
+    println!("{} {} ({} bytes)",
+        if child.is_directory { "d" } else { "-" },
+        child.name, child.size);
+}
+
+// Stream one file to any `std::io::Write`.
+let node = root.find_node("etc/hostname").ok_or("missing")?;
+let mut out = Vec::new();
+cat_node(&mut file, node, &mut out)?;
+
+// Extract a subtree to disk; the library refuses names that would
+// escape the output directory.
+extract_node(&mut file, node, "/tmp/extracted")?;
+# Ok::<(), isomage::Error>(())
+```
+
+Full API documentation lives at
+[**docs.rs/isomage**](https://docs.rs/isomage). The public surface is:
+
+| Item | What it does |
+|---|---|
+| [`detect_and_parse_filesystem`](https://docs.rs/isomage/latest/isomage/fn.detect_and_parse_filesystem.html) | Open and parse, trying ISO 9660 then UDF. |
+| [`cat_node`](https://docs.rs/isomage/latest/isomage/fn.cat_node.html) | Stream a file's bytes to any `Write`. BrokenPipe-tolerant. |
+| [`extract_node`](https://docs.rs/isomage/latest/isomage/fn.extract_node.html) | Extract a file or subtree to disk. Path-traversal-safe. |
+| [`TreeNode`](https://docs.rs/isomage/latest/isomage/tree/struct.TreeNode.html) | The parsed-tree model: file or directory, with byte-range references into the original image. |
+| [`isomage::iso9660`](https://docs.rs/isomage/latest/isomage/iso9660/index.html) and [`udf`](https://docs.rs/isomage/latest/isomage/udf/index.html) | The format-specific parsers, exposed for callers that already know which they have. |
+| [`isomage::Error`](https://docs.rs/isomage/latest/isomage/type.Error.html) / [`Result`](https://docs.rs/isomage/latest/isomage/type.Result.html) | `Box<dyn Error + Send + Sync + 'static>` and its result alias — composes cleanly with `anyhow` and threads. |
+
+MSRV is **1.74**.
+
+---
+
 ## Architecture
 
 isomage is small (~1.7k lines of Rust across five files). Read the
@@ -404,9 +467,22 @@ Release flow:
 
 ---
 
+## Security
+
+`isomage` is a parser for untrusted binary data and an extractor that
+writes to disk on the user's behalf. Vulnerability reports should go
+to GitHub's [private security advisories](https://github.com/JackDanger/isomage/security/advisories/new),
+not the public issue tracker — see [`SECURITY.md`](SECURITY.md) for
+the full policy. The current hardening surface (path-traversal guards,
+`BrokenPipe` tolerance, 64-bit-safe extract loops) is summarized there.
+
+---
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short checklist is in
+[`.github/pull_request_template.md`](.github/pull_request_template.md),
+which GitHub pre-fills for every new PR.
 
 isomage follows the [**promptlog pattern**](https://jackdanger.com/promptlog/):
 every PR that changes source code commits a sanitized log of the
@@ -418,6 +494,14 @@ enforces it.
 
 If you're an AI agent reading this, also read [`CLAUDE.md`](CLAUDE.md) —
 that's the short rulebook for this repo.
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the human-curated list of
+changes per release. Auto-generated release notes also live on each
+[GitHub Release](https://github.com/JackDanger/isomage/releases).
 
 ---
 

@@ -1,0 +1,71 @@
+name: Bug report
+description: Something is wrong with isomage's behaviour or output.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Before you submit:
+
+        - If this is a **security vulnerability** (an ISO that escapes
+          the output directory, a panic on a crafted image, leaked
+          bytes), please follow [`SECURITY.md`](https://github.com/JackDanger/isomage/blob/main/SECURITY.md)
+          instead — don't open a public issue.
+        - If your ISO won't parse, please run with `-v` first and
+          include the diagnostic output below; it tells the
+          maintainer where the parser gave up.
+
+  - type: input
+    id: version
+    attributes:
+      label: isomage version
+      description: Output of `isomage --version`.
+      placeholder: "isomage 1.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture (e.g. macOS 14 arm64, Ubuntu 24.04 x86_64).
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: The exact `isomage …` invocation, ideally pasted.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include the error message and, if relevant, `-v` output.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: iso
+    attributes:
+      label: The ISO image
+      description: |
+        A link to the image, or a description of how to produce one
+        that reproduces the bug. If the image is private or large,
+        a `dd if=image.iso bs=2048 count=2000 | gzip -9` head sample
+        is usually enough.
+    validations:
+      required: false
