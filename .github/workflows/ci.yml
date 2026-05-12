@@ -6,25 +6,158 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight CI on the same branch when a new push lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
 jobs:
+  # ---------------------------------------------------------------------
+  # Library tests on every supported platform.
+  # ---------------------------------------------------------------------
   test:
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install ISO tools (Ubuntu)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y genisoimage
       - name: Generate test data
         run: make test-data
-      - name: Build
-        run: cargo build
-      - name: Test
-        run: cargo test
+      - name: Build (lib)
+        run: cargo build --all-targets
+      - name: Test (lib unit + integration)
+        run: cargo test --all-targets
+      - name: Doc-tests
+        run: cargo test --doc
 
+  # ---------------------------------------------------------------------
+  # Formatting must match `cargo fmt`.
+  # ---------------------------------------------------------------------
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ---------------------------------------------------------------------
+  # Clippy with warnings = errors.
+  # ---------------------------------------------------------------------
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------
+  # rustdoc must build cleanly. This is the library's "public face" on
+  # docs.rs; broken intra-doc links are user-visible.
+  # ---------------------------------------------------------------------
+  docs:
+    name: cargo doc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features
+
+  # ---------------------------------------------------------------------
+  # The crate must still build on its declared minimum supported Rust.
+  # Library MSRV failures are a worse user-experience than build flags
+  # because cargo install / cargo add succeeds and then linking fails.
+  # ---------------------------------------------------------------------
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: rust-version
+        run: |
+          ver=$(grep -E '^rust-version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "MSRV=$ver" >> "$GITHUB_ENV"
+          echo "Detected MSRV: $ver"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ env.MSRV }}
+      - run: cargo build --all-targets
+
+  # ---------------------------------------------------------------------
+  # Known-vulnerable dependencies. With zero direct deps the surface is
+  # tiny — but if the dep tree ever grows, this job is the canary.
+  # ---------------------------------------------------------------------
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - run: cargo audit
+
+  # ---------------------------------------------------------------------
+  # Verify the published package contents are what we expect: pure
+  # source, no scripts/, no prompts/, no test_data/. Catches accidents
+  # in the Cargo.toml `include` list.
+  # ---------------------------------------------------------------------
+  package:
+    name: cargo publish --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+      - name: Pack and list contents
+        run: |
+          cargo package --no-verify --allow-dirty
+          echo "--- packaged files ---"
+          tar tzf target/package/isomage-*.crate
+      - name: Refuse to publish things we shouldn't
+        run: |
+          set -euo pipefail
+          tar tzf target/package/isomage-*.crate > /tmp/packaged.txt
+          forbidden_re='(^|/)(prompts|scripts|test_data|\.claude|\.github)/|install\.sh$|Makefile$'
+          if grep -E "$forbidden_re" /tmp/packaged.txt; then
+            echo "::error::publish contains files that should be excluded by Cargo.toml [include]" >&2
+            exit 1
+          fi
+          echo "✓ publish contents look right"
+
+  # ---------------------------------------------------------------------
+  # Promptlog gate (unchanged). See prompts/PROMPTLOG.md.
+  # ---------------------------------------------------------------------
   prompt-log:
     name: Prompt log check
     runs-on: ubuntu-latest
@@ -35,9 +168,6 @@ jobs:
           fetch-depth: 0
       - name: Check for prompt log entry
         env:
-          # Pass SHAs from the PR event payload — SHAs are always present
-          # in the local repo after fetch-depth: 0, while remote-tracking
-          # refs may not be set up the way we expect.
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
