@@ -1,26 +1,36 @@
 [package]
 name = "isomage"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
+rust-version = "1.74"
 license = "MIT"
 authors = ["Jack Danger <github@jackdanger.com>"]
-description = "Browse and extract files from ISO images without mounting them"
+description = "Pure-Rust reader for ISO 9660 (Joliet, Rock Ridge) and UDF disc images. Read-only, no mount, no FUSE."
 repository = "https://github.com/JackDanger/isomage"
 homepage = "https://github.com/JackDanger/isomage"
+documentation = "https://docs.rs/isomage"
 keywords = ["iso", "iso9660", "udf", "bluray", "filesystem"]
-categories = ["command-line-utilities", "filesystem"]
+categories = ["filesystem", "parser-implementations"]
 readme = "README.md"
-
-[[bin]]
-name = "isomage"
-path = "src/main.rs"
+# Restrict the crates.io upload to source + manifests + license + curated
+# docs. Tests, prompt logs, .claude/, scripts, and the Makefile stay in
+# the git repo but are not published.
+include = [
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+]
 
 [lib]
 name = "isomage"
 path = "src/lib.rs"
 
+# No dependencies. isomage parses the disc image bytes itself; the only
+# crate it ever pulled in was clap, which was solely for the CLI.
 [dependencies]
-clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 opt-level = 2
