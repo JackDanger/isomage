@@ -1,28 +1,40 @@
 # v3.0 implementation handoff
 
-This document captures the state of the v3.0 work after the
-governance + Phase 1 + Phase 2 + Phase 3-starter session of
-2026-05-12. It exists so the next agent (Sonnet / Composer 2)
-can resume without re-deriving context.
+This document captures the state of the v3.0 work as of the most
+recent commit on `chore/v3.0-foundation`. It exists so the next
+agent (Sonnet / Composer 2) can resume without re-deriving
+context.
 
-> The complete plan is in the prompt log:
-> `prompts/20260512-193754-v3-scope-expansion.md`.
-> Read it before starting work.
+> The complete plan is in the prompt logs:
+> `prompts/20260512-193754-v3-scope-expansion.md` (substrate),
+> `prompts/20260512-210223-round-trip-harness.md` (PR A1).
+> Read both before starting work.
 
-## What landed in this session
+## What landed across the v3.0 foundation branch
 
 - **Phase 0** — `CLAUDE.md` rewritten for v3.0 invariants; `Cargo.toml`
   feature matrix scaffolded (`mmap`, `simd`, `write`, plus one per
   planned format and codec). Zero new runtime deps in `default`.
 - **Phase 1** — `benches/seqread.rs` runs `isomage` and `7zz` over
   the corpus in `test_data/` via criterion. Skip-if-7zz-missing.
+  Compiled (not executed) in CI on every push so bench regressions
+  surface at build time.
 - **Phase 2** — `image_io::RandomAccess` trait + `MmapImage`
   (`mmap` feature, with contained `unsafe`); `simd::crc16_ccitt`
   (`simd` feature, table-based scalar with `TODO: PMULL`).
 - **Phase 3 start** — `formats::mbr`, `formats::gpt`,
   `formats::raw`. Each emits a `TreeNode` whose children are the
   partition byte ranges; `cat_node` extracts partition contents.
-- 47 unit tests + 7 doctests pass with `--features mmap,simd,raw,mbr,gpt`.
+- **PR A1 — round-trip harness** — `tests/common/` infrastructure:
+  Tool detection with alias chains, `RoundTrip` builder with
+  `$IMAGE`/`$SRC_DIR` substitution, golden-file snapshots,
+  `require_or_skip` pattern. Self-test (28 tests, universal POSIX
+  tools) runs everywhere; per-format `*_round_trip.rs` tests run
+  against real `sfdisk`/`sgdisk`/etc. Verified end-to-end against
+  `sgdisk 1.0.10` on macOS; committed snapshot files give CI a
+  pinned reference.
+- 54 lib tests + 7 doc tests + 28 self-test + 10 MBR + 9 GPT =
+  **108 tests** pass with `--features mbr,gpt,raw,mmap,simd`.
   `cargo clippy --all-targets -- -D warnings` clean on every
   feature combo.
 
@@ -30,12 +42,14 @@ can resume without re-deriving context.
 
 | Plan item | Status | Why |
 |-----------|--------|-----|
-| `TreeNode.name → Cow<'_, str>` | Not started | Requires rewriting `iso9660.rs` + `udf.rs` to take `&[u8]` (RandomAccess) instead of `Read + Seek`. ~50 internal callsites. High risk of subtle regression that the existing 35-test suite won't catch. Should be a dedicated session. |
-| Parser entry-point generalization (`&mut File` → `&mut (impl Read+Seek)`) | Not started | Same reason — cascades into the parsers' guts. Without it, `MmapImage` is useful only via the new `RandomAccess` path, not the v2 `detect_and_parse_filesystem` entry. |
-| GitHub issue for v3.0 milestone | Not opened | Outward-facing; user can open it manually. The prompt log captures the same content. |
+| `TreeNode.name → Cow<'_, str>` | Not started | Requires rewriting `iso9660.rs` + `udf.rs` to take `&[u8]` (RandomAccess) instead of `Read + Seek`. ~50 internal callsites. High risk of subtle regression that the existing 35-test suite won't catch. PR A2 (parser-entry generalization) lands first as a stepping stone. |
+| Parser entry-point generalization (`&mut File` → `&mut (impl Read+Seek)`) | **Next PR (A2)** | Mechanically straightforward, source-compatible, unblocks `MmapImage` for v2 callers. |
+| GitHub issue for v3.0 milestone | Not opened | Outward-facing; user can open it manually. The prompt logs capture the same content. |
 | Real SIMD CRC (PMULL/CLMUL) | Stubbed | Setup cost only amortizes above ~1 KiB; UDF descriptors are 16–512 B. The scalar table is the right baseline. Add intrinsics when SquashFS or VHDX log lands. |
-| Bench corpus | Trivially small | Existing test ISOs are ~400 KB each — overhead-dominated. Real numbers need ≥100 MB images. See `benches/seqread.rs` doc comment for the curl recipe. |
-| **`gzippy` crate identity** | UNRESOLVED | The user named this crate; `cargo search` returns no match. Phase 0 reserves the `deflate-gzippy` feature flag but adds no dep. **The first DEFLATE-bearing format (qcow2/dmg/squashfs/wim) needs the user to either re-confirm what they meant or pick from `flate2`/`libdeflater`/`miniz_oxide`/`libflate`. Block on this answer.** |
+| Bench corpus | Trivially small | Existing test ISOs are ~400 KB each — overhead-dominated. Real numbers need ≥100 MB images. `benches/seqread.rs` doc comment has the curl recipe; a `make bench-corpus` Makefile target would be a one-PR improvement. |
+| **`gzippy` crate identity** | UNRESOLVED | User named this crate; `cargo search` returns no match. Phase 0 reserves the `deflate-gzippy` feature flag but adds no dep. **The first DEFLATE-bearing format (qcow2/dmg/squashfs/wim) needs the user to re-confirm or pick from `flate2`/`libdeflater`/`miniz_oxide`/`libflate`. Block on this answer.** PR A3 (codec policy) is the gate. |
+| Fuzz harness for ISO/UDF | Not yet | MBR + GPT fuzz target stubs land with PR A1 polish; ISO/UDF parsers don't have one yet. Phase 6 of the plan; can pull forward at low cost. |
+| Cross-tool cross-validation | Not yet | Round-trips trust the reference tool. Parsing the same image with `fdisk -l` AND our parser AND asserting agreement would catch "we and sfdisk are wrong the same way" cases. Phase 6. |
 
 ## Where the API stands
 
@@ -60,6 +74,35 @@ The breaking changes that **will** make this v3.0 (not v2.1) are
 the `TreeNode.name → Cow` refactor and the parser-entry
 generalization. Until those land, the existing v2.x API is intact;
 the version in `Cargo.toml` stays at `2.0.0`.
+
+## Test infrastructure available to follow-on agents
+
+Every new format PR should use these. The shape is exercised end
+to end (mbr + gpt) and committed; pattern docs live in
+`tests/README.md`.
+
+- **`tests/common/tool.rs`** — `Tool::with_aliases("primary",
+  &["alias1", "alias2"])` declares a binary; `require_or_skip()`
+  is the test-guard pattern. Strict mode via env var.
+- **`tests/common/round_trip.rs`** — `RoundTrip::new("<name>")`
+  builder; `.with(tool)`, `.args(["...$IMAGE..."])`, `.stdin(...)`,
+  `.source_file(...)`, `.image_size(...)`, `.build_bytes()`.
+- **`tests/common/snapshot.rs`** — `assert_snapshot_with_tool(name,
+  tree, tool_version)`. Snapshots live at `tests/snapshots/<name>.snap`
+  with reference-tool version in the header.
+- **`tests/common/assertions.rs`** — `assert_path_exists`,
+  `assert_partition_at`, `assert_file_contents`,
+  `assert_tree_invariants`.
+- **`tests/common/binaries.rs`** — pre-declared `Tool`s for every
+  format we plan to support. Add new entries here when a new
+  reference tool enters the matrix; also update the apt/brew
+  install list in `.github/workflows/ci.yml`.
+
+When a new format lands, the agent writes one
+`tests/<format>_round_trip.rs` file using these helpers, adds
+the format's feature flag to `Cargo.toml` plus a
+`required-features` declaration for the test binary, and the
+existing `round-trip` CI job picks it up.
 
 ## Worktree-agent task list (Phase 3 cont. + Phase 4)
 

@@ -35,12 +35,38 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y genisoimage
       - name: Generate test data
         run: make test-data
-      - name: Build (lib)
+      - name: Build (lib, default features)
         run: cargo build --all-targets
-      - name: Test (lib unit + integration)
+      # The most surgical regression check: default features only,
+      # tests included. v3.0 broadens the feature matrix but the
+      # default-features build path is the user-facing API contract.
+      - name: Test (lib unit + integration, default features)
         run: cargo test --all-targets
+      # Zero-formats build. If a new feature accidentally hard-depends
+      # on `iso` or `udf`, this fails before the broad matrix does.
+      - name: Build (--no-default-features)
+        run: cargo build --no-default-features
+      # Each individual feature should compile in isolation, so a
+      # contributor adding a new format under `--features <new>` doesn't
+      # need every other feature on too. Spot-check three combos.
+      - name: Build (selected feature combos)
+        run: |
+          cargo build --no-default-features --features iso
+          cargo build --no-default-features --features udf
+          cargo build --no-default-features --features mmap
+          cargo build --no-default-features --features simd
+          cargo build --no-default-features --features mbr,gpt,raw
+      # All-features test. Round-trip binaries skip on macOS without
+      # format tools and run for real on the round-trip job.
+      - name: Test (all v3.0 features enabled)
+        run: cargo test --features mbr,gpt,raw,mmap,simd
       - name: Doc-tests
-        run: cargo test --doc
+        run: cargo test --doc --features mbr,gpt,raw,mmap,simd
+      # Compile-check the bench harness even though we don't run it
+      # here (criterion benches are non-deterministic on shared
+      # runners). Regressions in the bench code itself surface here.
+      - name: Compile benches
+        run: cargo bench --no-run --features mmap,simd
 
   # ---------------------------------------------------------------------
   # Reference-tool round-trip tests. Installs the partition-table,
