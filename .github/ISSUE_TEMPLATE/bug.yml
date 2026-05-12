@@ -1,0 +1,79 @@
+name: Bug report
+description: Something is wrong with what isomage parses or how it behaves.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Before you submit:
+
+        - If this is a **security vulnerability** (an ISO that escapes
+          the output directory, a panic on a crafted image, a memory
+          safety issue), please follow [`SECURITY.md`](https://github.com/JackDanger/isomage/blob/main/SECURITY.md)
+          instead — don't open a public issue.
+        - If parsing fails, calling `detect_and_parse_filesystem_verbose`
+          with `verbose = true` prints diagnostics to stderr. Including
+          that output below speeds up triage significantly.
+
+  - type: input
+    id: version
+    attributes:
+      label: isomage version
+      description: The `isomage` version from your `Cargo.toml` lockfile.
+      placeholder: "2.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: rust
+    attributes:
+      label: Rust toolchain
+      description: Output of `rustc --version`.
+      placeholder: "rustc 1.84.0 (...)"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture (e.g. macOS 14 arm64, Ubuntu 24.04 x86_64).
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Minimal reproduction
+      description: A code snippet that triggers the bug. Smaller is better.
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include the error message and, if relevant, `_verbose` output.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: iso
+    attributes:
+      label: The ISO image (if relevant)
+      description: |
+        A link, or a description of how to produce one that reproduces
+        the bug. For large or private images, a head sample is usually
+        enough — `dd if=image.iso bs=2048 count=2000 | gzip -9`.
+    validations:
+      required: false
