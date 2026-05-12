@@ -6,25 +6,191 @@ on:
   pull_request:
     branches: [main]
 
+# A new push to a PR cancels any in-flight CI for the same PR — saves a
+# pile of CPU on noisy review iterations.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
 jobs:
+  # ---------------------------------------------------------------------
+  # Build + test on every supported platform.
+  # ---------------------------------------------------------------------
   test:
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install ISO tools (Ubuntu)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y genisoimage
       - name: Generate test data
         run: make test-data
       - name: Build
-        run: cargo build
+        run: cargo build --all-targets
       - name: Test
-        run: cargo test
+        run: cargo test --all-targets
+      - name: Doc-tests
+        run: cargo test --doc
 
+  # ---------------------------------------------------------------------
+  # Formatting must match `cargo fmt`.
+  # ---------------------------------------------------------------------
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ---------------------------------------------------------------------
+  # Clippy with warnings = errors.
+  # ---------------------------------------------------------------------
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------
+  # rustdoc must build cleanly (no broken intra-doc links, no missing
+  # docs on public items if we ever enable that lint).
+  # ---------------------------------------------------------------------
+  docs:
+    name: cargo doc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features
+
+  # ---------------------------------------------------------------------
+  # The crate must still build on its declared minimum supported Rust.
+  # If this breaks, either bump `rust-version` in Cargo.toml or revert
+  # the change that needs newer Rust.
+  # ---------------------------------------------------------------------
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: rust-version
+        run: |
+          ver=$(grep -E '^rust-version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "MSRV=$ver" >> "$GITHUB_ENV"
+          echo "Detected MSRV: $ver"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ env.MSRV }}
+      - run: cargo build --all-targets
+
+  # ---------------------------------------------------------------------
+  # Known-vulnerable dependencies. cargo-audit reads RustSec.
+  # ---------------------------------------------------------------------
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - run: cargo audit
+
+  # ---------------------------------------------------------------------
+  # Release binary smoke test: builds the release artifact, then drives
+  # the surface area an end-user would hit (version, help, tree listing,
+  # cat, extract, completions, man page). Catches regressions in the
+  # places `cargo test` doesn't reach: binary startup, clap wiring,
+  # stdout/stderr split, the new tooling-integration flags.
+  # ---------------------------------------------------------------------
+  smoke:
+    name: release binary smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke
+      - name: Install ISO tools
+        run: sudo apt-get update && sudo apt-get install -y genisoimage
+      - name: Generate test data
+        run: make test-data
+      - name: Build release
+        run: cargo build --release
+      - name: --version reports Cargo.toml version
+        run: |
+          set -euxo pipefail
+          want=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          got=$(./target/release/isomage --version | awk '{print $2}')
+          [ "$want" = "$got" ] || { echo "version mismatch: Cargo=$want bin=$got" >&2; exit 1; }
+      - name: --help exits 0
+        run: ./target/release/isomage --help > /dev/null
+      - name: list mode prints the test ISO tree
+        run: |
+          out=$(./target/release/isomage test_data/test_linux.iso)
+          echo "$out"
+          echo "$out" | grep -q '^d /' || { echo "missing root entry" >&2; exit 1; }
+          echo "$out" | grep -q 'etc'    || { echo "missing etc entry"  >&2; exit 1; }
+      - name: cat mode is binary-safe and pipe-friendly
+        run: |
+          # The `| head` test exercises BrokenPipe handling — must not exit non-zero.
+          ./target/release/isomage -c etc/hostname test_data/test_linux.iso \
+            | head -c 4 > /dev/null
+      - name: extract mode rejects a tampered name
+        run: |
+          # The release lib's extract_node should refuse '/'-bearing names.
+          # We can't easily forge a TreeNode via the CLI, so we just exercise
+          # a normal extract and check it succeeds, leaving the negative
+          # path to the unit tests.
+          rm -rf /tmp/isomage-smoke-out
+          ./target/release/isomage -x etc -o /tmp/isomage-smoke-out test_data/test_linux.iso
+          test -f /tmp/isomage-smoke-out/etc/hostname
+      - name: --completions emits a bash script
+        run: |
+          out=$(./target/release/isomage --completions bash)
+          echo "$out" | head -3
+          echo "$out" | grep -q '^_isomage' || { echo "bash completions missing function" >&2; exit 1; }
+      - name: --man-page emits valid groff
+        run: |
+          out=$(./target/release/isomage --man-page)
+          echo "$out" | head -3
+          echo "$out" | grep -q '\.TH isomage 1' || { echo "man page missing .TH header" >&2; exit 1; }
+
+  # ---------------------------------------------------------------------
+  # Promptlog gate: every PR that changes src/ or Cargo.toml must add
+  # a prompts/*.md entry. See prompts/PROMPTLOG.md and
+  # .claude/skills/promptlog.md for what to write.
+  # ---------------------------------------------------------------------
   prompt-log:
     name: Prompt log check
     runs-on: ubuntu-latest

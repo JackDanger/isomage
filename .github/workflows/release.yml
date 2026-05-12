@@ -7,10 +7,50 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  # Build the man page and shell-completion scripts once on a native
+  # host, then make them available to every per-platform build job
+  # below — those are cross-compiled, so they can't run their own
+  # binary to generate these.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      - name: Build native release binary
+        run: cargo build --release
+      - name: Generate man page and completions
+        run: |
+          set -euxo pipefail
+          ./target/release/isomage --man-page > isomage.1
+          ./target/release/isomage --completions bash > isomage.bash
+          ./target/release/isomage --completions zsh  > isomage.zsh
+          ./target/release/isomage --completions fish > isomage.fish
+          # Sanity: refuse to ship empty or obviously-wrong artifacts.
+          test -s isomage.1   && grep -q '\.TH isomage 1' isomage.1
+          test -s isomage.bash
+          test -s isomage.zsh
+          test -s isomage.fish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs
+          path: |
+            isomage.1
+            isomage.bash
+            isomage.zsh
+            isomage.fish
+
   build:
+    needs: docs
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-latest
@@ -30,6 +70,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
       - name: Install musl tools (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
@@ -44,11 +87,29 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Fetch man page and completions
+        uses: actions/download-artifact@v4
+        with:
+          name: docs
+          path: .
       - name: Package
+        # Tarball layout (flat — install.sh expects the platform-suffixed
+        # binary at the top level, additions are alongside it):
+        #   isomage-<platform>            (the binary)
+        #   isomage.1                     (man page, groff)
+        #   isomage.bash                  (bash completions)
+        #   isomage.zsh                   (zsh completions)
+        #   isomage.fish                  (fish completions)
         run: |
+          set -euxo pipefail
           cp target/${{ matrix.target }}/release/isomage ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}
-          tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+          tar czf ${{ matrix.artifact }}.tar.gz \
+            ${{ matrix.artifact }} \
+            isomage.1 \
+            isomage.bash \
+            isomage.zsh \
+            isomage.fish
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -62,6 +123,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: isomage-*
           merge-multiple: true
       - name: Create checksums
         run: sha256sum *.tar.gz > checksums.txt
@@ -90,6 +152,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: isomage-*
           merge-multiple: true
       - name: Compute SHA256s
         id: sha
@@ -133,13 +196,25 @@ jobs:
             end
 
             def install
+              # Binary: rename the platform-suffixed file to plain "isomage".
               Dir.glob("isomage-*").each do |f|
                 bin.install f => "isomage"
               end
+              # Man page (section 1).
+              man1.install "isomage.1"
+              # Shell completions — Homebrew DSL puts these in the right
+              # directory for each shell and gates loading on \`brew --prefix\`.
+              bash_completion.install "isomage.bash" => "isomage"
+              zsh_completion.install  "isomage.zsh"  => "_isomage"
+              fish_completion.install "isomage.fish"
             end
 
             test do
               assert_match "isomage", shell_output("#{bin}/isomage --version")
+              # The man page should be installed and parsable.
+              assert_predicate man1/"isomage.1", :exist?
+              # The bash completion should reference our function name.
+              assert_match "_isomage", File.read(bash_completion/"isomage")
             end
           end
           RUBY
