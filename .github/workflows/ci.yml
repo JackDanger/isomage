@@ -239,7 +239,12 @@ jobs:
             .
             fuzz
       - name: Install cargo-fuzz
-        run: cargo install --locked cargo-fuzz
+        # No `--locked` here: cargo-fuzz's own Cargo.lock pins an
+        # old `rustix 0.36.5` whose internals (`rustc_attrs`-gated
+        # `rustc_layout_scalar_valid_range_end`) no longer compile
+        # on current nightly. Letting cargo resolve fresh deps
+        # picks a newer rustix that builds clean.
+        run: cargo install cargo-fuzz
       - name: Build all fuzz targets
         run: cargo +nightly fuzz build
 
@@ -289,6 +294,13 @@ jobs:
   # The crate must still build on its declared minimum supported Rust.
   # Library MSRV failures are a worse user-experience than build flags
   # because cargo install / cargo add succeeds and then linking fails.
+  #
+  # We check `cargo build --lib` (the published library), NOT
+  # `--all-targets`. MSRV applies to downstream consumers, who never
+  # see our dev-dependencies. Modern criterion/tempfile transitively
+  # pull crates that use Rust 2024 edition (clap 4.6+); requiring
+  # those to build at MSRV would tie our floor to the latest stable.
+  # Tests/benches build under the main `test` job's stable toolchain.
   # ---------------------------------------------------------------------
   msrv:
     name: MSRV
@@ -307,7 +319,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv-${{ env.MSRV }}
-      - run: cargo build --all-targets
+      # `--lib` skips tests/benches/examples — exactly what downstream
+      # users compile. We also pass each non-default feature so a
+      # feature-flagged code path can't sneak in a newer-MSRV
+      # requirement.
+      - name: cargo build --lib (default features)
+        run: cargo build --lib
+      - name: cargo build --lib (--no-default-features)
+        run: cargo build --lib --no-default-features
+      - name: cargo build --lib (every feature combo we ship)
+        run: |
+          for feat in iso udf mmap simd mbr gpt raw write; do
+            cargo build --lib --no-default-features --features "$feat"
+          done
+          cargo build --lib --features mmap,simd,mbr,gpt,raw
 
   # ---------------------------------------------------------------------
   # Known-vulnerable dependencies. With zero direct deps the surface is

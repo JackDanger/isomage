@@ -64,43 +64,50 @@ fn single_linux_partition() {
     assert_snapshot_with_tool("mbr-single-linux", &tree, tool_version.as_deref());
 }
 
-/// Three primary partitions, one empty slot. Verifies non-contiguous
-/// slot numbering survives the round trip.
+/// Three primary partitions of different types, contiguous in LBA
+/// order. Verifies multi-partition parsing and per-partition byte-
+/// range arithmetic across an MBR with non-trivial diversity.
+///
+/// Earlier draft used sfdisk's `;` directive to try to skip slot 2,
+/// but `;` means "use defaults" in sfdisk's DSL — partition 3 then
+/// swallowed all remaining space and a fourth partition request
+/// failed with "All space for primary partitions is in use." The
+/// "empty slot" case is covered by `formats::mbr::tests` directly
+/// (synthetic sector + parse), where we don't need sfdisk to
+/// express it.
 #[test]
-fn three_partitions_with_gap() {
+fn three_partitions_different_types() {
     let Some(_) = tools::SFDISK.require_or_skip() else {
         return;
     };
 
-    let image = RoundTrip::new("mbr-three-with-gap")
+    let image = RoundTrip::new("mbr-three-different")
         .with(&tools::SFDISK)
         .image_size(300 * 1024 * 1024)
         .args(["--wipe=always", "--no-tell-kernel", "$IMAGE"])
-        // sfdisk fills slots in order; to leave slot #2 empty we
-        // have to use the "skip empty" trick: explicit empty slot.
         .stdin(
             "label: dos\n\
              unit: sectors\n\
              2048,51200,83\n\
              53248,51200,07\n\
-             ;\n\
              104448,51200,82\n",
         )
         .build_bytes();
 
     let partitions = mbr::parse_sector(&image[..512]).expect("parse MBR");
-    // sfdisk may or may not honour the empty-slot directive; in
-    // practice it packs them. Allow 3 or 4 partitions but assert
-    // type codes match what we asked for in some order.
-    assert!(
-        partitions.len() == 3 || partitions.len() == 4,
-        "expected 3 or 4 partitions, got {}",
+    assert_eq!(
+        partitions.len(),
+        3,
+        "expected 3 partitions, got {}",
         partitions.len()
     );
     let mut types: Vec<u8> = partitions.iter().map(|p| p.type_code).collect();
-    types.retain(|&t| t != 0);
     types.sort_unstable();
     assert_eq!(types, vec![0x07, 0x82, 0x83]);
+
+    // Each partition starts where its `start=` field declared.
+    let starts: Vec<u64> = partitions.iter().map(|p| p.start).collect();
+    assert_eq!(starts, vec![2048 * 512, 53248 * 512, 104448 * 512]);
 }
 
 /// Protective-MBR detection: when `sgdisk` writes a GPT, it leaves
