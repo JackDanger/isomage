@@ -1,3 +1,13 @@
+# The crate is intentionally NOT a workspace root — but modern
+# cargo auto-detects subdirectory Cargo.tomls (e.g. fuzz/Cargo.toml)
+# as potential workspace members. The explicit `[workspace]` block
+# below declares the main crate as the only member and excludes
+# `fuzz/` so cargo from the repo root resolves features against
+# `isomage` only. The fuzz subcrate is its own standalone workspace.
+[workspace]
+members = ["."]
+exclude = ["fuzz"]
+
 [package]
 name = "isomage"
 version = "2.0.0"

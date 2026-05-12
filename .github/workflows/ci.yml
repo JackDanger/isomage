@@ -158,6 +158,35 @@ jobs:
           done
 
   # ---------------------------------------------------------------------
+  # Compile the cargo-fuzz targets under nightly. We don't *run* the
+  # fuzzers in CI (libFuzzer needs tens of seconds of warmup before it
+  # finds anything interesting, and runner minutes are finite) — but
+  # ensuring the targets still build catches API drift in the parsers
+  # they exercise. A separate, opt-in `fuzz-nightly` workflow runs the
+  # fuzzers themselves.
+  # ---------------------------------------------------------------------
+  fuzz-compile:
+    name: cargo fuzz build (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache key from the main test job so the nightly
+          # toolchain bits don't poison the stable cache.
+          key: fuzz-compile
+          workspaces: |
+            .
+            fuzz
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Build all fuzz targets
+        run: cargo +nightly fuzz build
+
+  # ---------------------------------------------------------------------
   # Formatting must match `cargo fmt`.
   # ---------------------------------------------------------------------
   fmt:
@@ -263,7 +292,7 @@ jobs:
         run: |
           set -euo pipefail
           tar tzf target/package/isomage-*.crate > /tmp/packaged.txt
-          forbidden_re='(^|/)(prompts|scripts|test_data|\.claude|\.github)/|install\.sh$|Makefile$'
+          forbidden_re='(^|/)(prompts|scripts|test_data|tests|fuzz|\.claude|\.github)/|install\.sh$|Makefile$|HANDOFF\.md$|Dockerfile'
           if grep -E "$forbidden_re" /tmp/packaged.txt; then
             echo "::error::publish contains files that should be excluded by Cargo.toml [include]" >&2
             exit 1

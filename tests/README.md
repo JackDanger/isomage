@@ -92,6 +92,14 @@ Then update `tests/common/binaries.rs` if the tool is new, and
 add the package name to both the Ubuntu apt-install and macOS
 brew-install lists in `.github/workflows/ci.yml`.
 
+## Fuzz tests
+
+`fuzz/` (separate from `tests/`) holds cargo-fuzz targets that
+hammer each parser with adversarial input. See
+[`fuzz/README.md`](../fuzz/README.md) for the run-it locally
+recipe; the CI `fuzz-compile` job verifies the targets build on
+every push.
+
 ## What the harness does **not** do (intentional gaps)
 
 - **Run tests in parallel against the same image file.** Each
@@ -108,3 +116,6 @@ brew-install lists in `.github/workflows/ci.yml`.
   When they do, `RoundTrip::overwrite_image` provides the
   reverse-direction primitive: isomage writes → reference tool
   validates via fsck/info.
+- **Run fuzz campaigns in CI.** `fuzz-compile` only builds the
+  targets. A `fuzz-nightly.yml` workflow that runs each target
+  for N minutes is on the plan; not yet wired.
