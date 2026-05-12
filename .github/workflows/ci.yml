@@ -158,6 +158,63 @@ jobs:
           done
 
   # ---------------------------------------------------------------------
+  # Round-trip tests against the *pinned* Docker tool image. This
+  # complements the apt-based `round-trip` job above:
+  #
+  #   - `round-trip` uses Ubuntu's apt repo — fast, but its tool
+  #     versions drift over time and might cause committed snapshot
+  #     files to need re-pinning every few months.
+  #   - `round-trip-pinned` uses ghcr.io/<owner>/isomage-test-tools,
+  #     which freezes every tool's version. Snapshots tied to a
+  #     specific image tag stay stable.
+  #
+  # Both run on every PR; both must pass. If they disagree, that's
+  # almost always an apt-repo drift that needs the snapshot
+  # re-pinned, not a code regression.
+  # ---------------------------------------------------------------------
+  round-trip-pinned:
+    name: round-trip-pinned (docker)
+    runs-on: ubuntu-latest
+    # Only run when the image exists. On the very first push that
+    # introduces this job, the image hasn't been built yet — the
+    # `test-tools-image` workflow needs a tag push first. Skip if
+    # we can't pull the image rather than failing.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: round-trip-pinned
+
+      - name: Derive image reference
+        id: image
+        run: |
+          owner_lower=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/${owner_lower}/isomage-test-tools:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Pull pinned tool image
+        id: pull
+        run: |
+          if docker pull "${{ steps.image.outputs.ref }}"; then
+            echo "have_image=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_image=0" >> "$GITHUB_OUTPUT"
+            echo "::warning::pinned tool image not yet published; skipping job"
+          fi
+
+      - name: Run round-trip tests through the pinned image
+        if: steps.pull.outputs.have_image == '1'
+        env:
+          ISOMAGE_TOOL_VENUE: docker:${{ steps.image.outputs.ref }}
+          ISOMAGE_REQUIRE_TOOLS: "1"
+        run: |
+          for bin in $(ls tests/*_round_trip.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
+            echo "=== $bin ==="
+            cargo test --features mmap,simd,raw,mbr,gpt --test "$bin"
+          done
+
+  # ---------------------------------------------------------------------
   # Compile the cargo-fuzz targets under nightly. We don't *run* the
   # fuzzers in CI (libFuzzer needs tens of seconds of warmup before it
   # finds anything interesting, and runner minutes are finite) — but

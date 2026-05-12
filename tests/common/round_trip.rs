@@ -177,8 +177,16 @@ impl RoundTrip {
         // cached, so the cost is a single hashmap lookup).
         let _ = Skip::if_missing(tool)?;
 
-        let tmp = TempDir::with_prefix(format!("isomage-rt-{}-", sanitize(&self.name)))
-            .expect("failed to create tempdir");
+        // Choose tempdir root from the active venue so Docker on
+        // macOS (default tempdir /var/folders/... is unshared) lands
+        // on /tmp instead. Path venue keeps std's default.
+        let prefix = format!("isomage-rt-{}-", sanitize(&self.name));
+        let tmp = match super::venue::ToolVenue::current().tempdir_root() {
+            // tempfile signature is `with_prefix_in(prefix, dir)`.
+            Some(root) => TempDir::with_prefix_in(&prefix, root),
+            None => TempDir::with_prefix(&prefix),
+        }
+        .expect("failed to create tempdir");
 
         let src_dir = tmp.path().join("src");
         let out_dir = tmp.path().join("out");
@@ -211,17 +219,19 @@ impl RoundTrip {
             .map(|a| substitute(a, &image_path, &src_dir, &out_dir, tmp.path()))
             .collect();
 
-        // Run the tool.
-        let output = if let Some(input) = &self.stdin {
-            tool.run_with_stdin(substituted.iter().map(|s| s.as_os_str()), input)
-        } else if !self.env.is_empty() {
-            tool.run_with_env(
-                substituted.iter().map(|s| s.as_os_str()),
-                self.env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())),
-            )
-        } else {
-            tool.run(substituted.iter().map(|s| s.as_os_str()))
-        };
+        // Run the tool. We use `run_in_venue` (not plain `run`) so
+        // ISOMAGE_TOOL_VENUE=docker:... can bind-mount the tempdir
+        // and the substituted `$IMAGE` / `$SRC_DIR` paths resolve
+        // identically inside and outside the container.
+        let bind_mounts: &[&std::path::Path] = &[tmp.path()];
+        let env_slice: Vec<(OsString, OsString)> = self.env.clone();
+        let stdin_slice: Option<&[u8]> = self.stdin.as_deref();
+        let output = tool.run_in_venue(
+            substituted.iter().map(|s| s.as_os_str()),
+            &env_slice,
+            stdin_slice,
+            bind_mounts,
+        );
 
         let output = output.map_err(Skip::from)?;
         // Strict-by-default: a non-zero exit from the tool is a

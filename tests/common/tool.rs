@@ -243,6 +243,27 @@ impl Tool {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_in_venue(args, env, stdin, &[])
+    }
+
+    /// Run the tool, optionally bind-mounting host paths into the
+    /// venue's container (only meaningful when [`ToolVenue::Docker`]
+    /// is in effect; ignored for [`ToolVenue::Path`]).
+    ///
+    /// [`super::round_trip::RoundTrip::try_build`] uses this to
+    /// thread the round-trip tempdir into the container, so
+    /// `$IMAGE` paths resolve identically inside and outside.
+    pub fn run_in_venue<I, S>(
+        &self,
+        args: I,
+        env: &[(OsString, OsString)],
+        stdin: Option<&[u8]>,
+        bind_mounts: &[&std::path::Path],
+    ) -> Result<ToolOutput, ToolError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         use std::io::Write;
 
         let resolved = self.resolve().ok_or_else(|| ToolError::NotFound {
@@ -250,7 +271,14 @@ impl Tool {
             searched: self.all_names().map(String::from).collect(),
         })?;
 
-        let mut cmd = Command::new(&resolved.path);
+        // ToolVenue::current() reads ISOMAGE_TOOL_VENUE. Default
+        // path-venue is `Command::new(resolved.path)`; Docker venue
+        // wraps the same call in `docker run --rm -v ...`.
+        let mut cmd = super::venue::ToolVenue::current().build_command(
+            &resolved.path,
+            resolved.name,
+            bind_mounts,
+        );
         cmd.args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

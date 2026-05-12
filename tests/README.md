@@ -92,6 +92,36 @@ Then update `tests/common/binaries.rs` if the tool is new, and
 add the package name to both the Ubuntu apt-install and macOS
 brew-install lists in `.github/workflows/ci.yml`.
 
+## Running reference tools through Docker (opt-in)
+
+For pinned tool versions and Linux-only tools on macOS, set
+`ISOMAGE_TOOL_VENUE` to the Docker image:
+
+```sh
+# Use the published pinned image
+ISOMAGE_TOOL_VENUE=docker:ghcr.io/jackdanger/isomage-test-tools:latest \
+    cargo test --features mbr,gpt --test gpt_round_trip
+
+# Or use a locally-built image
+docker build -f Dockerfile.test-tools -t isomage-test-tools:local .
+ISOMAGE_TOOL_VENUE=docker:isomage-test-tools:local \
+    cargo test --features mbr,gpt --test gpt_round_trip
+```
+
+When the Docker venue is active, the harness:
+
+- Routes its tempdir through `/tmp` so the bind-mount lands on a
+  Docker-shared path.
+- Invokes the tool inside the container, with the host tempdir
+  bind-mounted at the same path.
+- Maps the host user's UID/GID into the container so output files
+  end up host-owned.
+
+**macOS users**: see the "macOS host caveat" in
+[`tests/common/venue.rs`](common/venue.rs)'s module docs for
+the one-time Colima or Docker Desktop configuration step. CI on
+Linux runners has no such caveat.
+
 ## Fuzz tests
 
 `fuzz/` (separate from `tests/`) holds cargo-fuzz targets that

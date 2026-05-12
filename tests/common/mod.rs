@@ -60,6 +60,7 @@ pub mod binaries;
 pub mod round_trip;
 pub mod snapshot;
 pub mod tool;
+pub mod venue;
 
 pub use binaries::tools;
 pub use round_trip::RoundTrip;
