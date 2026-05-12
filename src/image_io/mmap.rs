@@ -37,30 +37,39 @@ use super::RandomAccess;
 /// transparently, and [`RandomAccess`] so v3 format submodules can
 /// borrow slices without copying.
 ///
-/// # Example
+/// # Example: zero-copy read
 ///
 /// ```no_run
 /// use isomage::image_io::{MmapImage, RandomAccess};
 ///
 /// let img = MmapImage::open("disc.iso")?;
-/// // Read 16 bytes at offset 32768 (ISO 9660 PVD location) without
-/// // any allocation or syscall: the slice points straight into the
-/// // mapped region.
+/// // Read 5 bytes at offset 32769 (ISO 9660 PVD's Standard Identifier
+/// // field) without any allocation or syscall: the slice points
+/// // straight into the mapped region.
 /// let pvd_magic = img.read_at(32768 + 1, 5)?;
-/// // "CD001" — the ISO 9660 Standard Identifier (ECMA-119 §8.4.2).
+/// // "CD001" — ECMA-119 §8.4.2.
 /// assert_eq!(pvd_magic, b"CD001");
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync + 'static>>(())
 /// ```
 ///
-/// # v2 parser compatibility
+/// # Example: drop-in for the v3 reader entries
 ///
-/// `MmapImage` implements `Read + Seek`, so in principle it could be
-/// plugged into [`crate::detect_and_parse_filesystem`]. As of v2.x
-/// that entry point pins its argument to `&mut File`, so feeding it
-/// an `MmapImage` requires the planned v3.0 signature
-/// generalization. Until then, drive parsing via the `iso9660` and
-/// `udf` submodules directly, or stick with `File` and accept the
-/// extra syscalls.
+/// `MmapImage` implements `Read + Seek`, and as of v3.0 every public
+/// reader entry point ([`crate::detect_and_parse_filesystem`],
+/// [`crate::cat_node`], [`crate::extract_node`]) takes
+/// `&mut (impl Read + Seek)`. You can hand an `MmapImage` to any of
+/// them and benefit from kernel page-cache prefetch without changing
+/// caller code.
+///
+/// ```no_run
+/// use isomage::image_io::MmapImage;
+/// use isomage::detect_and_parse_filesystem;
+///
+/// let mut img = MmapImage::open("disc.iso")?;
+/// let root = detect_and_parse_filesystem(&mut img, "disc.iso")?;
+/// assert_eq!(root.name, "/");
+/// # Ok::<(), isomage::Error>(())
+/// ```
 pub struct MmapImage {
     // Held only so the mmap can't outlive the file descriptor.
     // The map itself does not technically need the File alive after

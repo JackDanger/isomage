@@ -67,7 +67,12 @@ pub mod formats;
 
 pub use tree::TreeNode;
 
-use std::fs::{create_dir_all, File};
+// `File` is no longer named by the public API as of v3.0 — the
+// reader entry points are generic over `R: Read + Seek`. `File`
+// remains the canonical example in doc-tests (which `use` it
+// themselves) and is used as `std::fs::File::create` in the
+// extraction code path below.
+use std::fs::create_dir_all;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -101,17 +106,23 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// assert_eq!(root.name, "/");
 /// # Ok::<(), isomage::Error>(())
 /// ```
-pub fn detect_and_parse_filesystem(file: &mut File, filename: &str) -> Result<TreeNode> {
+pub fn detect_and_parse_filesystem<R: Read + Seek>(
+    file: &mut R,
+    filename: &str,
+) -> Result<TreeNode> {
     detect_and_parse_filesystem_verbose(file, filename, false)
 }
 
 /// Like [`detect_and_parse_filesystem`], but prints spec-section-tagged
 /// diagnostics to stderr while parsing.
 ///
-/// Useful for investigating images that fail to parse. The CLI's `-v`
-/// flag wires through to this entry point.
-pub fn detect_and_parse_filesystem_verbose(
-    file: &mut File,
+/// Useful for investigating images that fail to parse. As of v3.0
+/// this entry — like every other public reader — is generic over
+/// `&mut (impl Read + Seek)`; pass a `File`, an
+/// [`image_io::MmapImage`] (with `--features mmap`), an in-memory
+/// `Cursor<Vec<u8>>`, or any other `Read + Seek` source.
+pub fn detect_and_parse_filesystem_verbose<R: Read + Seek>(
+    file: &mut R,
     filename: &str,
     verbose: bool,
 ) -> Result<TreeNode> {
@@ -221,7 +232,11 @@ pub fn detect_and_parse_filesystem_verbose(
 /// cat_node(&mut file, node, &mut out)?;
 /// # Ok::<(), isomage::Error>(())
 /// ```
-pub fn cat_node<W: Write>(file: &mut File, node: &TreeNode, writer: &mut W) -> Result<()> {
+pub fn cat_node<R: Read + Seek, W: Write>(
+    file: &mut R,
+    node: &TreeNode,
+    writer: &mut W,
+) -> Result<()> {
     if node.is_directory {
         return Err(format!("'{}' is a directory, not a file", node.name).into());
     }
@@ -280,7 +295,11 @@ pub fn cat_node<W: Write>(file: &mut File, node: &TreeNode, writer: &mut W) -> R
 /// extract_node(&mut file, subtree, "/tmp/disc-docs")?;
 /// # Ok::<(), isomage::Error>(())
 /// ```
-pub fn extract_node(file: &mut File, node: &TreeNode, output_path: &str) -> Result<()> {
+pub fn extract_node<R: Read + Seek>(
+    file: &mut R,
+    node: &TreeNode,
+    output_path: &str,
+) -> Result<()> {
     create_dir_all(output_path)
         .map_err(|e| format!("cannot create output directory '{}': {}", output_path, e))?;
     let root = std::fs::canonicalize(output_path).map_err(|e| {
@@ -343,7 +362,12 @@ fn safe_join(root: &Path, here: &Path, name: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
-fn extract_into(file: &mut File, node: &TreeNode, root: &Path, here: &Path) -> Result<()> {
+fn extract_into<R: Read + Seek>(
+    file: &mut R,
+    node: &TreeNode,
+    root: &Path,
+    here: &Path,
+) -> Result<()> {
     let target = safe_join(root, here, &node.name)?;
 
     if node.is_directory {
@@ -358,7 +382,7 @@ fn extract_into(file: &mut File, node: &TreeNode, root: &Path, here: &Path) -> R
     Ok(())
 }
 
-fn extract_file_at(file: &mut File, node: &TreeNode, target: &Path) -> Result<()> {
+fn extract_file_at<R: Read + Seek>(file: &mut R, node: &TreeNode, target: &Path) -> Result<()> {
     let (location, length) = match (node.file_location, node.file_length) {
         (Some(l), Some(n)) => (l, n),
         _ => return Err("File location information not available for extraction".into()),
