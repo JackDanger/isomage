@@ -158,26 +158,15 @@ fn apfs_detect_rejects_too_short() {
 
 // ── Test 8: hdiutil-based detection (macOS only, skips on Linux) ──────────────
 
-/// On macOS, create a real APFS container with `hdiutil create -fs APFS` and
-/// verify that `apfs::detect()` recognises it.
-///
-/// `hdiutil create -fs APFS` writes an HFS-wrapped APFS image (a DMG containing
-/// an APFS container). The raw APFS container is inside the DMG's main partition.
-/// For this test we only check that detection works on the raw .img file produced
-/// by `hdiutil create -format UDRW -fs APFS`. Getting a raw APFS block device
-/// (not wrapped in a DMG) requires `hdiutil attach -nomount`, which needs root
-/// and a real block device — too invasive for CI. We skip gracefully if
-/// `hdiutil` is absent or the image produced is DMG-wrapped (non-raw).
+/// On macOS, creating a raw APFS container requires `hdiutil attach -nomount`
+/// which needs root and a real block device. This is too invasive for CI.
+/// Full APFS round-trip coverage is provided by the hand-crafted tests above.
+/// Marked `#[ignore]` to exclude from the normal test run while preserving
+/// the scaffold for environments with root access.
+#[cfg(target_os = "macos")]
 #[test]
+#[ignore]
 fn apfs_detect_hdiutil() {
-    // Skip immediately if hdiutil is not available (Linux, etc.).
-    if tools::HDIUTIL.require_or_skip().is_none() {
-        return;
-    }
-
-    // We cannot reliably create a *raw* APFS image without root on macOS CI.
-    // This test is a placeholder that skips gracefully to avoid CI noise while
-    // leaving the scaffold for environments where root access is available.
-    // Full APFS round-trip coverage is provided by the hand-crafted tests above.
+    let _ = tools::HDIUTIL.require_or_skip();
     eprintln!("skip: apfs_detect_hdiutil — creating raw APFS images without root is unsupported on this host");
 }

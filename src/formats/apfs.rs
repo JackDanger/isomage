@@ -161,10 +161,10 @@ pub fn detect<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
 fn do_detect<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
     r.seek(SeekFrom::Start(NXSB_MAGIC_OFFSET))?;
     let mut buf = [0u8; 4];
-    match r.read(&mut buf) {
-        Ok(n) if n < 4 => return Err(Error::TooShort),
+    match r.read_exact(&mut buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(Error::TooShort),
         Err(e) => return Err(Error::Io(e)),
-        Ok(_) => {}
     }
     let magic = u32::from_le_bytes(buf);
     if magic != NXSB_MAGIC {
@@ -181,9 +181,13 @@ pub fn read_nx_superblock<R: Read + Seek>(r: &mut R) -> Result<NxSuperblock, Err
     // ── magic ──
     r.seek(SeekFrom::Start(NXSB_MAGIC_OFFSET))?;
     let mut buf4 = [0u8; 4];
-    if r.read(&mut buf4)? < 4 {
-        return Err(Error::TooShort);
-    }
+    r.read_exact(&mut buf4).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::TooShort
+        } else {
+            Error::Io(e)
+        }
+    })?;
     let magic = u32::from_le_bytes(buf4);
     if magic != NXSB_MAGIC {
         return Err(Error::BadMagic);
@@ -191,9 +195,13 @@ pub fn read_nx_superblock<R: Read + Seek>(r: &mut R) -> Result<NxSuperblock, Err
 
     // ── block_size ──
     r.seek(SeekFrom::Start(NXSB_BLOCK_SIZE_OFFSET))?;
-    if r.read(&mut buf4)? < 4 {
-        return Err(Error::TooShort);
-    }
+    r.read_exact(&mut buf4).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::TooShort
+        } else {
+            Error::Io(e)
+        }
+    })?;
     let block_size = u32::from_le_bytes(buf4);
     if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size)
         || (block_size & (block_size - 1)) != 0
@@ -206,10 +214,10 @@ pub fn read_nx_superblock<R: Read + Seek>(r: &mut R) -> Result<NxSuperblock, Err
     let mut fs_oids: Vec<u64> = Vec::new();
     let mut buf8 = [0u8; 8];
     for _ in 0..NXSB_MAX_FS_OIDS {
-        match r.read(&mut buf8) {
-            Ok(n) if n < 8 => break,
-            Err(_) => break,
-            Ok(_) => {}
+        match r.read_exact(&mut buf8) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(Error::Io(e)),
         }
         let oid = u64::from_le_bytes(buf8);
         if oid == 0 {
@@ -236,9 +244,7 @@ fn read_volume_name<R: Read + Seek>(r: &mut R, block_num: u64, block_size: u32) 
         return None;
     }
     let mut buf4 = [0u8; 4];
-    if r.read(&mut buf4).ok()? < 4 {
-        return None;
-    }
+    r.read_exact(&mut buf4).ok()?;
     let magic = u32::from_le_bytes(buf4);
     if magic != APSB_MAGIC {
         return None;
@@ -250,9 +256,7 @@ fn read_volume_name<R: Read + Seek>(r: &mut R, block_num: u64, block_size: u32) 
         return None;
     }
     let mut name_buf = [0u8; APSB_VOLNAME_LEN];
-    if r.read(&mut name_buf).ok()? == 0 {
-        return None;
-    }
+    r.read_exact(&mut name_buf).ok()?;
 
     // Find null terminator and decode as UTF-8.
     let end = name_buf
