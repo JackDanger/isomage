@@ -57,12 +57,13 @@ jobs:
           cargo build --no-default-features --features simd
           cargo build --no-default-features --features mbr,gpt,raw
           cargo build --no-default-features --features fat
+          cargo build --no-default-features --features ext
       # All-features test. Round-trip binaries skip on macOS without
       # format tools and run for real on the round-trip job.
       - name: Test (all v3.0 features enabled)
-        run: cargo test --features mbr,gpt,raw,fat,mmap,simd
+        run: cargo test --features mbr,gpt,raw,fat,ext,mmap,simd
       - name: Doc-tests
-        run: cargo test --doc --features mbr,gpt,raw,fat,mmap,simd
+        run: cargo test --doc --features mbr,gpt,raw,fat,ext,mmap,simd
       # Compile-check the bench harness even though we don't run it
       # here (criterion benches are non-deterministic on shared
       # runners). Regressions in the bench code itself surface here.
@@ -131,8 +132,7 @@ jobs:
             sevenzip || true
 
       - name: Build round-trip tests
-        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat --tests
-
+        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat,ext --tests
       - name: Run round-trip tests (Ubuntu strict)
         if: runner.os == 'Linux'
         env:
@@ -143,7 +143,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext --test "$bin"
           done
 
       - name: Run round-trip tests (macOS, non-strict)
@@ -155,7 +155,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext --test "$bin"
           done
 
   # ---------------------------------------------------------------------
@@ -212,7 +212,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext --test "$bin"
           done
 
   # ---------------------------------------------------------------------
@@ -274,7 +274,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features mbr,gpt,raw,fat,ext,mmap,simd -- -D warnings
 
   # ---------------------------------------------------------------------
   # rustdoc must build cleanly. This is the library's "public face" on
@@ -330,11 +330,10 @@ jobs:
         run: cargo build --lib --no-default-features
       - name: cargo build --lib (every feature combo we ship)
         run: |
-          for feat in iso udf mmap simd mbr gpt raw fat write; do
+          for feat in iso udf mmap simd mbr gpt raw fat write ext; do
             cargo build --lib --no-default-features --features "$feat"
           done
-          cargo build --lib --features mmap,simd,mbr,gpt,raw,fat
-
+          cargo build --lib --features mmap,simd,mbr,gpt,raw,fat,ext
   # ---------------------------------------------------------------------
   # Known-vulnerable dependencies. With zero direct deps the surface is
   # tiny — but if the dep tree ever grows, this job is the canary.
