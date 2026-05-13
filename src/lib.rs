@@ -1,8 +1,7 @@
 //! # isomage
 //!
 //! Browse and extract files from ISO 9660 and UDF disc images directly,
-//! without mounting them. The crate ships both a CLI binary (`isomage`)
-//! and this library; they share the same parser code.
+//! without mounting them. Pure-Rust, zero runtime dependencies, no CLI binary.
 //!
 //! ## What this library does
 //!
@@ -116,11 +115,11 @@ pub fn detect_and_parse_filesystem<R: Read + Seek>(
 /// Like [`detect_and_parse_filesystem`], but prints spec-section-tagged
 /// diagnostics to stderr while parsing.
 ///
-/// Useful for investigating images that fail to parse. As of v3.0
-/// this entry — like every other public reader — is generic over
-/// `&mut (impl Read + Seek)`; pass a `File`, an
-/// [`image_io::MmapImage`] (with `--features mmap`), an in-memory
-/// `Cursor<Vec<u8>>`, or any other `Read + Seek` source.
+/// Useful for investigating images that fail to parse, or when building
+/// your own diagnostic wrapper (see README's "If you want a CLI" section).
+/// Generic over any `Read + Seek` source: pass a `File`, an
+/// [`image_io::MmapImage`] (with `--features mmap`), or an in-memory
+/// `Cursor<Vec<u8>>`.
 pub fn detect_and_parse_filesystem_verbose<R: Read + Seek>(
     file: &mut R,
     filename: &str,
@@ -215,7 +214,7 @@ pub fn detect_and_parse_filesystem_verbose<R: Read + Seek>(
 /// error. Other I/O errors are propagated unchanged.
 ///
 /// `writer` receives only file bytes — no headers, framing, or progress
-/// output. This is what makes the CLI's `-c` mode binary-safe.
+/// output. This makes the function safe to use in pipelines.
 ///
 /// # Example
 ///
@@ -277,9 +276,9 @@ pub fn cat_node<R: Read + Seek, W: Write>(
 ///
 /// Every entry name is validated to reject path traversal: names that are
 /// empty, `.`, `..`, or that contain `/`, `\`, or NUL bytes are refused
-/// with an error. As defense in depth, each resolved output path is
-/// checked to stay within the canonicalized output directory before any
-/// file is created. This means an adversarial ISO whose directory records
+/// with an error. As defense in depth, each constructed output path is
+/// verified to remain within the (canonicalized) output root via a lexical
+/// `starts_with` check. This means an adversarial ISO whose directory records
 /// claim a name like `../../etc/passwd` will produce a clear error, not
 /// silently overwrite host files.
 ///

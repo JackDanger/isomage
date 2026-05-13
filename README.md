@@ -275,7 +275,7 @@ in CI or downstream will notice.
 2. **Read-only.** No code path writes to the input file. Open in
    read mode and never seek past EOF without bounds-checking first.
 3. **No mmap, no panics.** Use `Seek + Read` with the existing chunk
-   size constant. Parsers return `io::Error` on bad input; a
+   size constant. Parsers return `Err` (never panic) on bad input; a
    `.unwrap()` on parser-derived data is a bug.
 4. **`u64` for lengths, clamp before `usize` cast.** Anywhere a
    `u64` file length meets a `usize` buffer, clamp by the buffer
@@ -301,7 +301,7 @@ in CI or downstream will notice.
 | You want to… | Touch this |
 |---|---|
 | Support a new on-disc filesystem (HFS+, exFAT, FAT) | Add `src/<fs>.rs` exposing `parse_<fs>{,_verbose}`. Register it in `detect_and_parse_filesystem_verbose` in `src/lib.rs` after the existing tries. |
-| Add a new metadata field to entries (timestamps, permissions) | Add fields to `TreeNode` in `src/tree.rs`, populate from each parser, render where appropriate. Adding *new* `pub` fields is non-breaking; reordering or removing existing ones is. |
+| Add a new metadata field to entries (timestamps, permissions) | Add fields to `TreeNode` in `src/tree.rs`, populate from each parser, render where appropriate. Adding *new* `pub` fields is non-breaking; removing or renaming existing ones is. |
 | Make parsing faster | Look at `EXTRACT_CHUNK_SIZE` in `src/lib.rs` and the inner read loops in `iso9660.rs` / `udf.rs`. No mmap, no `unsafe`. |
 | Add a new diagnostic in `-verbose` mode | `eprintln!` from inside the parser, gated on `verbose`. |
 | Improve docs.rs landing | Crate-level `//!` doc at the top of `src/lib.rs` controls the docs.rs front page. |
