@@ -6,7 +6,8 @@
 
 use crate::tree::TreeNode;
 use crate::Result;
-use std::fs::File;
+// `File` is no longer mentioned by the parser; entry points are
+// generic over `R: Read + Seek` as of v3.0.
 use std::io::{Read, Seek, SeekFrom};
 
 const SECTOR_SIZE: u64 = 2048;
@@ -66,13 +67,18 @@ fn read_long_ad(buffer: &[u8]) -> LongAd {
 /// Equivalent to `parse_udf_verbose(file, false)`. Errors out cleanly
 /// (returns `Err`, never panics) on images whose anchor or partition
 /// descriptors don't validate.
-pub fn parse_udf(file: &mut File) -> Result<TreeNode> {
+pub fn parse_udf<R: Read + Seek>(file: &mut R) -> Result<TreeNode> {
     parse_udf_verbose(file, false)
 }
 
 /// Like [`parse_udf`], but prints spec-section-tagged diagnostics to
 /// stderr while parsing. Useful for investigating images that fail.
-pub fn parse_udf_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
+///
+/// As of v3.0 this takes `&mut (impl Read + Seek)` rather than
+/// `&mut File`, so consumers can feed it an `MmapImage`, a
+/// `Cursor<Vec<u8>>`, or any other byte-source that implements
+/// both traits.
+pub fn parse_udf_verbose<R: Read + Seek>(file: &mut R, verbose: bool) -> Result<TreeNode> {
     // Check for UDF markers in the Volume Recognition Sequence (sectors 16-31)
     let mut found_udf_marker = false;
     if verbose {
@@ -541,8 +547,8 @@ fn get_file_allocation(fe_buffer: &[u8]) -> Result<FileAllocation> {
     })
 }
 
-fn parse_directory(
-    file: &mut File,
+fn parse_directory<R: Read + Seek>(
+    file: &mut R,
     partition_start: u64,
     icb_long_ad: &LongAd,
     parent_node: &mut TreeNode,
@@ -687,8 +693,8 @@ fn parse_directory(
     Ok(())
 }
 
-fn get_file_info(
-    file: &mut File,
+fn get_file_info<R: Read + Seek>(
+    file: &mut R,
     partition_start: u64,
     icb_long_ad: &LongAd,
 ) -> Result<FileAllocation> {

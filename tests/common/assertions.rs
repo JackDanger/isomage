@@ -76,26 +76,14 @@ pub fn assert_partition_at(
 /// assertion is decoupled from how the test got the bytes (mmap,
 /// File, in-memory, etc.).
 ///
-/// Currently `cat_node` requires `&mut File`, so this helper writes
-/// `image` to a tempfile and opens it. When the parser-entry-point
-/// generalization PR lands, this helper switches to `Cursor` in
-/// place.
+/// As of v3.0 (PR A2) `cat_node` accepts any `&mut (impl Read +
+/// Seek)`, so we feed it a `Cursor` over the in-memory image
+/// directly — no tempfile materialisation, no IO syscalls.
 pub fn assert_file_contents(image: &[u8], root: &TreeNode, slash_path: &str, expected: &[u8]) {
-    use std::fs::File;
-    use std::io::Write;
-
-    let dir = tempfile::TempDir::with_prefix("isomage-cat-").expect("tempdir");
-    let path = dir.path().join("image.bin");
-    {
-        let mut f = File::create(&path).expect("create tempfile");
-        f.write_all(image).expect("write image");
-        f.sync_all().expect("sync");
-    }
-    let mut f = File::open(&path).expect("reopen tempfile");
-
     let node = assert_path_exists(root, slash_path);
     let mut got = Vec::with_capacity(expected.len());
-    isomage::cat_node(&mut f, node, &mut got).expect("cat_node");
+    let mut cur = Cursor::new(image);
+    isomage::cat_node(&mut cur, node, &mut got).expect("cat_node");
     if got != expected {
         panic!(
             "file {:?}: expected {} bytes, got {} bytes\n\
@@ -131,7 +119,6 @@ fn walk_size(node: &TreeNode) -> u64 {
     }
 }
 
-/// Silence unused-import warnings when only some helpers are used.
-/// (Per-test-binary unused-warning policy is strict.)
-#[allow(dead_code)]
-fn _silence_cursor_warning(_c: Cursor<&[u8]>) {}
+// The `Cursor` import above is used by `assert_file_contents`; no
+// silencer needed now that the v3.0 generic entry points let us
+// feed it straight through.

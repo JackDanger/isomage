@@ -6,7 +6,9 @@
 
 use crate::tree::TreeNode;
 use crate::Result;
-use std::fs::File;
+// `File` is no longer mentioned by the parser; entry points are
+// generic over `R: Read + Seek` as of v3.0. Keeping the imports
+// minimal matches the rest of the crate's style.
 use std::io::{Read, Seek, SeekFrom};
 
 const SECTOR_SIZE: u64 = 2048;
@@ -31,13 +33,18 @@ enum VolumeDescriptorType {
 /// Equivalent to `parse_iso9660_verbose(file, false)`. Errors out cleanly
 /// (returns `Err`, never panics) on images whose volume descriptors don't
 /// validate.
-pub fn parse_iso9660(file: &mut File) -> Result<TreeNode> {
+pub fn parse_iso9660<R: Read + Seek>(file: &mut R) -> Result<TreeNode> {
     parse_iso9660_verbose(file, false)
 }
 
 /// Like [`parse_iso9660`], but prints spec-section-tagged diagnostics to
 /// stderr while parsing. Useful for investigating images that fail.
-pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode> {
+///
+/// As of v3.0 this takes `&mut (impl Read + Seek)` rather than
+/// `&mut File`, so consumers can feed it an `MmapImage`, a
+/// `Cursor<Vec<u8>>`, or any other byte-source that implements the
+/// trait pair.
+pub fn parse_iso9660_verbose<R: Read + Seek>(file: &mut R, verbose: bool) -> Result<TreeNode> {
     // Scan all volume descriptors to find Primary and Joliet
     let mut primary_vd: Option<Vec<u8>> = None;
     let mut joliet_vd: Option<Vec<u8>> = None;
@@ -148,7 +155,7 @@ pub fn parse_iso9660_verbose(file: &mut File, verbose: bool) -> Result<TreeNode>
     Ok(root_node)
 }
 
-fn detect_rock_ridge(file: &mut File, dir_record: &DirectoryRecord) -> Result<bool> {
+fn detect_rock_ridge<R: Read + Seek>(file: &mut R, dir_record: &DirectoryRecord) -> Result<bool> {
     file.seek(SeekFrom::Start(
         dir_record.extent_location as u64 * SECTOR_SIZE,
     ))?;
@@ -284,8 +291,8 @@ fn extract_rock_ridge_name(
     }
 }
 
-fn parse_directory(
-    file: &mut File,
+fn parse_directory<R: Read + Seek>(
+    file: &mut R,
     dir_record: &DirectoryRecord,
     parent_node: &mut TreeNode,
     vd_type: VolumeDescriptorType,

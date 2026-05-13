@@ -118,6 +118,10 @@ required-features = ["mbr"]
 name = "gpt_round_trip"
 required-features = ["gpt"]
 
+[[test]]
+name = "mmap_parity"
+required-features = ["mmap"]
+
 [profile.release]
 opt-level = 2
 lto = true
