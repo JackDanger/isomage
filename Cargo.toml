@@ -146,6 +146,10 @@ required-features = ["ntfs"]
 name = "hfsplus_round_trip"
 required-features = ["hfsplus"]
 
+[[test]]
+name = "wim_round_trip"
+required-features = ["wim"]
+
 [profile.release]
 opt-level = 2
 lto = true
