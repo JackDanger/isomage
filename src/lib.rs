@@ -25,8 +25,8 @@
 //! records) attempt to write outside the destination via `..` traversal.
 //!
 //! [`cat_node`] returns `Ok(())` when the downstream writer closes
-//! its pipe (`BrokenPipe`), matching standard Unix tool behaviour for
-//! `isomage -c huge.iso | head`.
+//! its pipe (`BrokenPipe`), matching standard Unix pipeline behaviour
+//! (e.g. `cat_node(&node, &mut stdout())?` piped to `head`).
 //!
 //! ## Quick example
 //!
@@ -209,9 +209,9 @@ pub fn detect_and_parse_filesystem_verbose<R: Read + Seek>(
 /// `file_location` / `file_length` pair populated by the parsers.
 ///
 /// **Broken pipe handling.** If `writer` returns `ErrorKind::BrokenPipe`
-/// (e.g. the downstream of a Unix pipe closed early — `isomage -c huge.iso
-/// | head`), this function returns `Ok(())` rather than propagating the
-/// error. Other I/O errors are propagated unchanged.
+/// (e.g. a downstream `head` closed the pipe early), this function
+/// returns `Ok(())` rather than propagating the error.
+/// Other I/O errors are propagated unchanged.
 ///
 /// `writer` receives only file bytes — no headers, framing, or progress
 /// output. This makes the function safe to use in pipelines.
@@ -281,6 +281,13 @@ pub fn cat_node<R: Read + Seek, W: Write>(
 /// `starts_with` check. This means an adversarial ISO whose directory records
 /// claim a name like `../../etc/passwd` will produce a clear error, not
 /// silently overwrite host files.
+///
+/// **Symlink limitation.** This check is lexical-only and does not follow
+/// symlinks. If the output directory already contains a symlink pointing
+/// outside it (e.g. `out/link → /etc`), extracting a file named `link/passwd`
+/// into `out/` would follow the symlink. To avoid this, extract into a freshly
+/// created empty directory, or audit the destination for pre-existing symlinks
+/// before calling this function.
 ///
 /// # Example
 ///
