@@ -15,8 +15,7 @@
 //!    consumers who only want ISO/UDF aren't paying for everything.
 //!    See `Cargo.toml` for the matrix.
 //!
-//! The Phase 3 starter set is below. Subsequent formats (`vhd`,
-//! `vmdk`, `qcow2`, `fat`, `ntfs`, etc.) follow the same pattern.
+//! The Phase 3 starter set is below. Subsequent formats follow the same pattern.
 
 #[cfg(feature = "mbr")]
 pub mod mbr;
@@ -32,3 +31,30 @@ pub mod fat;
 
 #[cfg(feature = "ext")]
 pub mod ext;
+
+#[cfg(feature = "squashfs")]
+pub mod squashfs;
+
+#[cfg(feature = "vhd")]
+pub mod vhd;
+
+#[cfg(feature = "vmdk")]
+pub mod vmdk;
+
+#[cfg(feature = "qcow2")]
+pub mod qcow2;
+
+#[cfg(feature = "ntfs")]
+pub mod ntfs;
+
+#[cfg(feature = "hfsplus")]
+pub mod hfsplus;
+
+#[cfg(feature = "wim")]
+pub mod wim;
+
+#[cfg(feature = "dmg")]
+pub mod dmg;
+
+#[cfg(feature = "apfs")]
+pub mod apfs;

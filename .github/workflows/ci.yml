@@ -58,12 +58,21 @@ jobs:
           cargo build --no-default-features --features mbr,gpt,raw
           cargo build --no-default-features --features fat
           cargo build --no-default-features --features ext
+          cargo build --no-default-features --features squashfs
+          cargo build --no-default-features --features vhd
+          cargo build --no-default-features --features vmdk
+          cargo build --no-default-features --features qcow2
+          cargo build --no-default-features --features ntfs
+          cargo build --no-default-features --features hfsplus
+          cargo build --no-default-features --features wim
+          cargo build --no-default-features --features dmg
+          cargo build --no-default-features --features apfs
       # All-features test. Round-trip binaries skip on macOS without
       # format tools and run for real on the round-trip job.
       - name: Test (all v3.0 features enabled)
-        run: cargo test --features mbr,gpt,raw,fat,ext,mmap,simd
+        run: cargo test --features mbr,gpt,raw,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,mmap,simd
       - name: Doc-tests
-        run: cargo test --doc --features mbr,gpt,raw,fat,ext,mmap,simd
+        run: cargo test --doc --features mbr,gpt,raw,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,mmap,simd
       # Compile-check the bench harness even though we don't run it
       # here (criterion benches are non-deterministic on shared
       # runners). Regressions in the bench code itself surface here.
@@ -110,6 +119,7 @@ jobs:
             e2fsprogs \
             mtools \
             ntfs-3g \
+            hfsprogs \
             p7zip-full
 
       - name: Install format tools (macOS)
@@ -132,7 +142,7 @@ jobs:
             sevenzip || true
 
       - name: Build round-trip tests
-        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat,ext --tests
+        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs --tests
       - name: Run round-trip tests (Ubuntu strict)
         if: runner.os == 'Linux'
         env:
@@ -143,7 +153,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs --test "$bin"
           done
 
       - name: Run round-trip tests (macOS, non-strict)
@@ -155,7 +165,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs --test "$bin"
           done
 
   # ---------------------------------------------------------------------
@@ -212,7 +222,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs --test "$bin"
           done
 
   # ---------------------------------------------------------------------
@@ -274,7 +284,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --features mbr,gpt,raw,fat,ext,mmap,simd -- -D warnings
+      - run: cargo clippy --all-targets --features mbr,gpt,raw,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,mmap,simd -- -D warnings
 
   # ---------------------------------------------------------------------
   # rustdoc must build cleanly. This is the library's "public face" on
@@ -330,10 +340,10 @@ jobs:
         run: cargo build --lib --no-default-features
       - name: cargo build --lib (every feature combo we ship)
         run: |
-          for feat in iso udf mmap simd mbr gpt raw fat write ext; do
+          for feat in iso udf mmap simd mbr gpt raw fat write ext squashfs vhd vmdk qcow2 ntfs hfsplus wim dmg apfs; do
             cargo build --lib --no-default-features --features "$feat"
           done
-          cargo build --lib --features mmap,simd,mbr,gpt,raw,fat,ext
+          cargo build --lib --features mmap,simd,mbr,gpt,raw,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs
   # ---------------------------------------------------------------------
   # Known-vulnerable dependencies. With zero direct deps the surface is
   # tiny — but if the dep tree ever grows, this job is the canary.

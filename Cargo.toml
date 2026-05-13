@@ -130,6 +130,42 @@ required-features = ["fat"]
 name = "ext_round_trip"
 required-features = ["ext"]
 
+[[test]]
+name = "squashfs_round_trip"
+required-features = ["squashfs"]
+
+[[test]]
+name = "vhd_round_trip"
+required-features = ["vhd"]
+
+[[test]]
+name = "vmdk_round_trip"
+required-features = ["vmdk"]
+
+[[test]]
+name = "qcow2_round_trip"
+required-features = ["qcow2"]
+
+[[test]]
+name = "ntfs_round_trip"
+required-features = ["ntfs"]
+
+[[test]]
+name = "hfsplus_round_trip"
+required-features = ["hfsplus"]
+
+[[test]]
+name = "wim_round_trip"
+required-features = ["wim"]
+
+[[test]]
+name = "dmg_round_trip"
+required-features = ["dmg"]
+
+[[test]]
+name = "apfs_round_trip"
+required-features = ["apfs"]
+
 [profile.release]
 opt-level = 2
 lto = true
