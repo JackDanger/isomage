@@ -12,7 +12,7 @@
 //! modules (raw, MBR, GPT, VHD, …) take advantage of zero-copy
 //! reads when they're available. The existing parsers still work
 //! over `Read + Seek`; nothing breaks. When a caller hands them a
-//! [`MmapImage`] (`--features mmap`), the parser path is unchanged
+//! `MmapImage` (`--features mmap`), the parser path is unchanged
 //! but the underlying syscalls disappear into the page cache.
 //!
 //! The eventual `TreeNode.name → Cow<'a, str>` refactor (planned

@@ -118,7 +118,7 @@ pub fn detect_and_parse_filesystem<R: Read + Seek>(
 /// Useful for investigating images that fail to parse, or when building
 /// your own diagnostic wrapper (see README's "If you want a CLI" section).
 /// Generic over any `Read + Seek` source: pass a `File`, an
-/// [`image_io::MmapImage`] (with `--features mmap`), or an in-memory
+/// `image_io::MmapImage` (with `--features mmap`), or an in-memory
 /// `Cursor<Vec<u8>>`.
 pub fn detect_and_parse_filesystem_verbose<R: Read + Seek>(
     file: &mut R,
