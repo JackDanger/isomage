@@ -142,6 +142,10 @@ required-features = ["qcow2"]
 name = "ntfs_round_trip"
 required-features = ["ntfs"]
 
+[[test]]
+name = "hfsplus_round_trip"
+required-features = ["hfsplus"]
+
 [profile.release]
 opt-level = 2
 lto = true
