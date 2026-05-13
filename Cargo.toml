@@ -150,6 +150,10 @@ required-features = ["hfsplus"]
 name = "wim_round_trip"
 required-features = ["wim"]
 
+[[test]]
+name = "dmg_round_trip"
+required-features = ["dmg"]
+
 [profile.release]
 opt-level = 2
 lto = true
