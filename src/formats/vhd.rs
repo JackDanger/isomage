@@ -258,14 +258,21 @@ pub fn detect_and_parse<R: Read + Seek>(r: &mut R) -> Result<TreeNode, Error> {
     let footer = read_footer(r, footer_offset)?;
 
     match footer.disk_type {
-        DISK_TYPE_FIXED => parse_fixed(footer.current_size),
-        DISK_TYPE_DYNAMIC => parse_dynamic(r, &footer),
+        DISK_TYPE_FIXED => parse_fixed(footer.current_size, file_len),
+        DISK_TYPE_DYNAMIC => parse_dynamic(r, &footer, file_len),
         other => Err(Error::UnsupportedType(other)),
     }
 }
 
 /// Build the tree for a Fixed VHD. Data occupies bytes 0..current_size.
-fn parse_fixed(current_size: u64) -> Result<TreeNode, Error> {
+fn parse_fixed(current_size: u64, file_len: u64) -> Result<TreeNode, Error> {
+    // Validate that current_size doesn't exceed the available data region.
+    // A fixed VHD is: [disk data: current_size bytes] [footer: 512 bytes].
+    let data_region = file_len.saturating_sub(FOOTER_SIZE);
+    if current_size > data_region {
+        return Err(Error::TooShort);
+    }
+
     let mut root = TreeNode::new_directory("/".to_string());
 
     // For a Fixed VHD the raw disk data starts at byte 0 and is
@@ -280,14 +287,22 @@ fn parse_fixed(current_size: u64) -> Result<TreeNode, Error> {
 
 /// Build the tree for a Dynamic VHD. Data is fragmented across BAT blocks;
 /// we report the virtual size but set `file_location = None`.
-fn parse_dynamic<R: Read + Seek>(r: &mut R, footer: &Footer) -> Result<TreeNode, Error> {
+fn parse_dynamic<R: Read + Seek>(r: &mut R, footer: &Footer, file_len: u64) -> Result<TreeNode, Error> {
     // The Dynamic Disk Header lives at data_offset (= 512 for standard VHDs).
+    // Validate data_offset before seeking to avoid seeking past EOF on corrupt images.
     let dyn_header_offset = footer.data_offset;
+    if dyn_header_offset > file_len.saturating_sub(1024) {
+        return Err(Error::TooShort);
+    }
 
     // Read 1024 bytes of the Dynamic Disk Header.
     r.seek(SeekFrom::Start(dyn_header_offset))?;
     let mut hdr = [0u8; 1024];
-    r.read_exact(&mut hdr)?;
+    match r.read_exact(&mut hdr) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(Error::TooShort),
+        Err(e) => return Err(Error::Io(e)),
+    }
 
     // Verify the Dynamic Disk Header cookie.
     if &hdr[0..8] != DYN_HEADER_COOKIE {
@@ -506,9 +521,8 @@ mod tests {
     fn checksum_corrupted_footer_fails() {
         let img = build_fixed_vhd(512);
         let mut patched = img.clone();
-        // Corrupt byte 0 (part of the cookie — but checksum covers it).
         let footer_start = patched.len() - 512;
-        patched[footer_start + 10] ^= 0xFF; // Flip bits in features field.
+        patched[footer_start + 10] ^= 0xFF; // Flip bits in the features field (byte 10).
         let footer_slice: &[u8; 512] = patched[footer_start..].try_into().unwrap();
         assert!(
             !verify_checksum(footer_slice),
