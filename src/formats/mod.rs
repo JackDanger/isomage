@@ -29,3 +29,6 @@ pub mod raw;
 
 #[cfg(feature = "fat")]
 pub mod fat;
+
+#[cfg(feature = "ext")]
+pub mod ext;

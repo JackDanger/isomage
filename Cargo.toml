@@ -126,6 +126,10 @@ required-features = ["mmap"]
 name = "fat_round_trip"
 required-features = ["fat"]
 
+[[test]]
+name = "ext_round_trip"
+required-features = ["ext"]
+
 [profile.release]
 opt-level = 2
 lto = true
