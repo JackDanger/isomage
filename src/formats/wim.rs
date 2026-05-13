@@ -365,6 +365,18 @@ pub fn detect_and_parse<R: Read + Seek>(r: &mut R) -> Result<TreeNode, Error> {
         return Err(Error::Compressed);
     }
 
+    // Validate original_size before allocating: bounds-check against the
+    // actual file size and impose a 64 MiB cap so a corrupt header can't
+    // drive an OOM. WIM XML metadata is always well under 1 MiB in practice.
+    let file_size = r.seek(io::SeekFrom::End(0))?;
+    const MAX_XML_SIZE: u64 = 64 * 1024 * 1024;
+    if xml_res.original_size > MAX_XML_SIZE
+        || xml_res.offset > file_size
+        || xml_res.original_size > file_size - xml_res.offset
+    {
+        return Err(Error::TooShort);
+    }
+
     // Read the raw XML bytes.
     r.seek(SeekFrom::Start(xml_res.offset))?;
     let read_len = xml_res.original_size as usize;
@@ -390,8 +402,10 @@ pub fn detect_and_parse<R: Read + Seek>(r: &mut R) -> Result<TreeNode, Error> {
     let mut root = TreeNode::new_directory("/".to_string());
 
     // If XML gave us no entries, fall back to image_count from the header.
+    // Cap at 4096 to prevent a corrupt header from driving excessive allocation.
     if entries.is_empty() {
-        for i in 1..=header.image_count {
+        let count = header.image_count.min(4096);
+        for i in 1..=count {
             let node = TreeNode::new_directory(format!("Image {i}"));
             root.add_child(node);
         }
