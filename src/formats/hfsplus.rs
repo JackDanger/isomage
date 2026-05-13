@@ -276,9 +276,13 @@ pub fn detect<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
 fn do_detect<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
     r.seek(SeekFrom::Start(VOLUME_HEADER_OFFSET))?;
     let mut sig = [0u8; 2];
-    if r.read(&mut sig)? < 2 {
-        return Err(Error::TooShort);
-    }
+    r.read_exact(&mut sig).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::TooShort
+        } else {
+            Error::Io(e)
+        }
+    })?;
     let sig_val = u16::from_be_bytes([sig[0], sig[1]]);
     if sig_val != HFS_PLUS_MAGIC && sig_val != HFSX_MAGIC {
         return Err(Error::BadMagic);
@@ -292,9 +296,13 @@ fn do_detect<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
 pub fn parse_volume_header<R: Read + Seek>(r: &mut R) -> Result<VolumeHeader, Error> {
     r.seek(SeekFrom::Start(VOLUME_HEADER_OFFSET))?;
     let mut buf = [0u8; VOLUME_HEADER_SIZE];
-    if r.read(&mut buf)? < VOLUME_HEADER_SIZE {
-        return Err(Error::TooShort);
-    }
+    r.read_exact(&mut buf).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::TooShort
+        } else {
+            Error::Io(e)
+        }
+    })?;
     VolumeHeader::from_bytes(&buf)
 }
 
@@ -341,14 +349,20 @@ fn read_catalog_leaf_records<R: Read + Seek>(
     };
 
     // ── Step 1: Read the B-tree header node (node 0) ──
-    // We don't know node_size yet, so conservatively read 512 bytes for
-    // the node descriptor + header record. 512 bytes is the minimum
-    // valid node size per the HFS+ spec.
+    // We read exactly 120 bytes (14-byte node descriptor + 106-byte BTHeaderRec).
+    // Per the HFS+ spec (TN1150 §2.2), the B-tree header record ALWAYS begins
+    // at byte 14 of the header node, immediately after the node descriptor.
+    // We do not use the offset table to locate record 0 here because the offset
+    // table lives at the END of the node — and we don't know node_size yet.
     r.seek(SeekFrom::Start(cat_offset))?;
-    let mut header_node_buf = vec![0u8; 512];
-    if r.read(&mut header_node_buf)? < 512 {
-        return Err(Error::TooShort);
-    }
+    let mut header_node_buf = vec![0u8; 120]; // 14 (descriptor) + 106 (BTHeaderRec)
+    r.read_exact(&mut header_node_buf).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::TooShort
+        } else {
+            Error::Io(e)
+        }
+    })?;
 
     // B-tree node descriptor is 14 bytes at the start of every node.
     let node_kind = header_node_buf[8];
@@ -361,14 +375,8 @@ fn read_catalog_leaf_records<R: Read + Seek>(
         return Err(Error::TooShort);
     }
 
-    // The record-offset array lives at the END of the node (§4.3.3).
-    // For a 512-byte header node read, offset[0] is at byte 510 and
-    // points to the start of the first record (the B-tree header record).
-    let rec0_start = u16::from_be_bytes([header_node_buf[510], header_node_buf[511]]) as usize;
-    if rec0_start + 106 > 512 {
-        return Err(Error::TooShort);
-    }
-    let btree_header = BTreeHeader::from_bytes(&header_node_buf[rec0_start..]);
+    // The BTHeaderRec starts at byte 14 (immediately after the node descriptor).
+    let btree_header = BTreeHeader::from_bytes(&header_node_buf[14..]);
 
     let node_size = btree_header.node_size as u64;
     if node_size < 512 {
@@ -397,9 +405,13 @@ fn read_catalog_leaf_records<R: Read + Seek>(
         let node_offset = cat_offset + first_leaf as u64 * node_size;
         r.seek(SeekFrom::Start(node_offset))?;
         let mut node_buf = vec![0u8; node_size as usize];
-        if r.read(&mut node_buf)? < node_size as usize {
-            return Err(Error::TooShort);
-        }
+        r.read_exact(&mut node_buf).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                Error::TooShort
+            } else {
+                Error::Io(e)
+            }
+        })?;
 
         // Node descriptor (14 bytes).
         let f_link = u32::from_be_bytes(node_buf[0..4].try_into().unwrap());
