@@ -126,6 +126,10 @@ required-features = ["ext"]
 name = "squashfs_round_trip"
 required-features = ["squashfs"]
 
+[[test]]
+name = "vhd_round_trip"
+required-features = ["vhd"]
+
 [profile.release]
 opt-level = 2
 lto = true
