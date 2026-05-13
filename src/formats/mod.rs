@@ -26,3 +26,6 @@ pub mod gpt;
 
 #[cfg(feature = "raw")]
 pub mod raw;
+
+#[cfg(feature = "ext")]
+pub mod ext;
