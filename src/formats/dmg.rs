@@ -37,9 +37,10 @@
 //! [64]  u8[16]  segment_id          (UUID)
 //! [80]  u32     data_fork_digest_type
 //! [84]  u8[128] data_fork_digest
-//! [212] u64     xml_offset
-//! [220] u64     xml_length
-//! [228] u8[120] reserved1
+//! [212] u8[4]   reserved
+//! [216] u64     xml_offset
+//! [224] u64     xml_length
+//! [232] u8[120] reserved1
 //! [348] u32     checksum_type
 //! [352] u8[136] master_checksum
 //! [488] u32     image_variant       // 1=RO, 2=RW, 3=ROC

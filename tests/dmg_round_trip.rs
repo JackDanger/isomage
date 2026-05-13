@@ -28,13 +28,10 @@ use isomage::formats::dmg;
 
 /// Build a minimal HFS+ DMG using `hdiutil create -srcfolder`.
 ///
-/// `hdiutil create -srcfolder <dir> -format UDRO <outpath>` creates a
-/// read-only UDIF image from the directory contents. The output path
-/// gets `.dmg` appended by hdiutil; we stage a dummy file so the
-/// volume has content.
-///
-/// Returns `None` (causing the test to skip) when `hdiutil` is not
-/// installed (Linux runners, any non-macOS host).
+/// Only compiled on macOS where `hdiutil` is available. Linux round-trip
+/// coverage uses hand-crafted koly trailers (see the `hand_crafted_dmg` tests
+/// below) and is not gated on `ISOMAGE_REQUIRE_TOOLS`.
+#[cfg(target_os = "macos")]
 fn make_hdiutil_dmg() -> Option<Vec<u8>> {
     let _ = tools::HDIUTIL.require_or_skip()?;
 
@@ -119,6 +116,7 @@ fn hand_crafted_dmg(xml: &str, sector_count: u64) -> Vec<u8> {
 
 // ── Test 1: detect() succeeds on a real hdiutil DMG ─────────────────────────
 
+#[cfg(target_os = "macos")]
 #[test]
 fn dmg_detect() {
     let Some(bytes) = make_hdiutil_dmg() else {
@@ -134,6 +132,7 @@ fn dmg_detect() {
 
 // ── Test 2: detect() restores the cursor ─────────────────────────────────────
 
+#[cfg(target_os = "macos")]
 #[test]
 fn dmg_detect_restores_cursor() {
     let Some(bytes) = make_hdiutil_dmg() else {
@@ -152,6 +151,7 @@ fn dmg_detect_restores_cursor() {
 
 // ── Test 3: detect_and_parse() returns valid root on a real DMG ──────────────
 
+#[cfg(target_os = "macos")]
 #[test]
 fn dmg_koly_fields() {
     let Some(bytes) = make_hdiutil_dmg() else {
@@ -173,6 +173,7 @@ fn dmg_koly_fields() {
 
 // ── Test 4: partition names are non-empty ────────────────────────────────────
 
+#[cfg(target_os = "macos")]
 #[test]
 fn dmg_partition_names() {
     let Some(bytes) = make_hdiutil_dmg() else {
