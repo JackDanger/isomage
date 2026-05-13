@@ -83,6 +83,14 @@ fn is_eoc(fat_type: FatType, cluster: u32) -> bool {
     }
 }
 
+fn is_bad_cluster(fat_type: FatType, cluster: u32) -> bool {
+    match fat_type {
+        FatType::Fat12 => cluster == 0x0FF7,
+        FatType::Fat16 => cluster == 0xFFF7,
+        FatType::Fat32 => (cluster & 0x0FFF_FFFF) == 0x0FFF_FFF7,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parsed BPB + derived geometry (§ 2–4)
 // ---------------------------------------------------------------------------
@@ -147,17 +155,23 @@ impl Context {
     }
 
     /// Walk the FAT from `start_cluster`, returning the ordered chain of
-    /// cluster numbers. Truncates on cycle or corrupt chain.
+    /// cluster numbers. Stops at EOC, bad-cluster markers, out-of-range
+    /// cluster numbers, and cycles (chain length exceeds total_clusters).
     fn cluster_chain<R: Read + Seek>(&self, file: &mut R, start: u32) -> Result<Vec<u32>, Error> {
         let mut chain = Vec::new();
         let mut cluster = start;
-        let limit = (self.total_clusters as usize).saturating_add(2).max(8);
+        // Valid data clusters are 2..=total_clusters+1.
+        let max_valid = self.total_clusters.saturating_add(1);
         loop {
-            if cluster < 2 || is_eoc(self.fat_type, cluster) {
+            if cluster < 2 || cluster > max_valid {
+                break;
+            }
+            if is_eoc(self.fat_type, cluster) || is_bad_cluster(self.fat_type, cluster) {
                 break;
             }
             chain.push(cluster);
-            if chain.len() > limit {
+            if chain.len() > self.total_clusters as usize {
+                // Cycle or corrupt chain — stop.
                 break;
             }
             cluster = self.fat_entry(file, cluster)?;
@@ -465,12 +479,13 @@ fn build_tree<R: Read + Seek>(
             for child in children {
                 dir_node.add_child(child);
             }
-            dir_node.calculate_directory_size();
             nodes.push(dir_node);
         } else {
             let node = if entry.start_cluster >= 2 && entry.file_size > 0 {
                 let chain = ctx.cluster_chain(file, entry.start_cluster)?;
-                if !chain.is_empty() && is_contiguous(&chain) {
+                let required_clusters =
+                    (entry.file_size as u64).div_ceil(ctx.bytes_per_cluster) as usize;
+                if !chain.is_empty() && is_contiguous(&chain) && chain.len() >= required_clusters {
                     TreeNode::new_file_with_location(
                         entry.name,
                         entry.file_size as u64,
@@ -478,7 +493,7 @@ fn build_tree<R: Read + Seek>(
                         entry.file_size as u64,
                     )
                 } else {
-                    // Fragmented file: tree entry exists but cat_node won't work.
+                    // Fragmented or truncated chain: tree entry exists but cat_node won't work.
                     TreeNode::new_file(entry.name, entry.file_size as u64)
                 }
             } else {
@@ -782,12 +797,13 @@ mod tests {
     #[test]
     fn fat12_with_lfn_entry() {
         // Build a root directory with a VFAT LFN entry followed by the 8.3
-        // entry. The LFN carries "LongFileName.txt" (16 chars → 1 LFN entry).
+        // entry. The LFN carries "LongFile.txt" (12 chars → fits in 1 LFN entry
+        // since each holds 13 UTF-16 code units).
         let mut img = make_fat12_image();
         let rd = 512 * 3;
 
-        // LFN entry (sequence 0x41 = last + seq 1): "LongFileName.tx" (13 chars)
-        let lfn_name_chars: Vec<u16> = "LongFileNam.txt"
+        // LFN entry (sequence 0x41 = last + seq 1): "LongFile.txt" (12 chars + null).
+        let lfn_name_chars: Vec<u16> = "LongFile.txt"
             .encode_utf16()
             .chain(std::iter::once(0x0000)) // null terminator
             .collect();
@@ -826,11 +842,11 @@ mod tests {
         let mut cursor = Cursor::new(&img);
         let tree = detect_and_parse(&mut cursor).unwrap();
         assert_eq!(tree.children.len(), 1);
-        // The LFN name should be used, not the 8.3 name.
-        let name = &tree.children[0].name;
-        assert!(
-            !name.starts_with("LONGFI"),
-            "LFN should be used, got: {name}"
+        // The LFN name should be used, not the 8.3 name "LONGFI~1.TXT".
+        assert_eq!(
+            tree.children[0].name, "LongFile.txt",
+            "LFN reassembly failed, got: {}",
+            tree.children[0].name
         );
     }
 
