@@ -94,7 +94,7 @@ pub enum Error {
     Compressed,
     /// Underlying I/O error.
     Io(io::Error),
-    /// Directory tree is nested deeper than [`MAX_DEPTH`] levels.
+    /// Directory tree is nested deeper than `MAX_DEPTH` (64) levels.
     TooDeep,
 }
 
