@@ -122,6 +122,10 @@ required-features = ["gpt"]
 name = "mmap_parity"
 required-features = ["mmap"]
 
+[[test]]
+name = "fat_round_trip"
+required-features = ["fat"]
+
 [profile.release]
 opt-level = 2
 lto = true
