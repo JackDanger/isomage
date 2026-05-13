@@ -68,6 +68,9 @@ pub enum Error {
     BadMagic,
     /// The volume header version field was not 4 (HFS+) or 5 (HFSX).
     BadVersion,
+    /// The catalog B-tree structure is invalid (e.g. node 0 is not a
+    /// header node, or the node size is below the minimum of 512 bytes).
+    BadCatalog,
     /// The B-tree or catalog structure is too deeply nested for our
     /// recursion guard.
     TooDeep,
@@ -84,6 +87,7 @@ impl std::fmt::Display for Error {
                 "HFS+ magic 0x482B or HFSX magic 0x4858 not found at offset 1024"
             ),
             Error::BadVersion => write!(f, "HFS+ version field is not 4 (HFS+) or 5 (HFSX)"),
+            Error::BadCatalog => write!(f, "HFS+ catalog B-tree structure is invalid"),
             Error::TooDeep => write!(f, "HFS+ B-tree too deep to traverse"),
             Error::Io(e) => write!(f, "HFS+ I/O error: {e}"),
         }
@@ -269,7 +273,7 @@ enum CatalogRecord {
 pub fn detect<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
     let saved = r.stream_position()?;
     let result = do_detect(r);
-    r.seek(SeekFrom::Start(saved))?;
+    let _ = r.seek(SeekFrom::Start(saved));
     result
 }
 
@@ -368,7 +372,7 @@ fn read_catalog_leaf_records<R: Read + Seek>(
     let node_kind = header_node_buf[8];
     if node_kind != BTREE_HEADER_NODE {
         // Node 0 must be the header node.
-        return Err(Error::BadMagic);
+        return Err(Error::BadCatalog);
     }
     let num_records_in_header = u16::from_be_bytes([header_node_buf[10], header_node_buf[11]]);
     if num_records_in_header < 1 {
@@ -380,7 +384,7 @@ fn read_catalog_leaf_records<R: Read + Seek>(
 
     let node_size = btree_header.node_size as u64;
     if node_size < 512 {
-        return Err(Error::BadVersion);
+        return Err(Error::BadCatalog);
     }
 
     let mut first_leaf = btree_header.first_leaf_node;

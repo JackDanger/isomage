@@ -37,7 +37,7 @@ const MKFS_HFSPLUS: Tool = Tool::new("mkfs.hfsplus");
 /// Helper: build a minimal HFS+ image (8 MiB, no files) using `mkfs.hfsplus`.
 ///
 /// Returns `None` (causing the test to skip) if `mkfs.hfsplus` is not
-/// installed or fails.
+/// installed. Panics if the tool is present but fails to create the image.
 fn make_hfsplus_image() -> Option<Vec<u8>> {
     let _ = MKFS_HFSPLUS.require_or_skip()?;
 
