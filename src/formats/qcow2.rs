@@ -4,7 +4,7 @@
 //! source tree (`docs/interop/qcow2.txt`) and in the libvirt wiki.
 //! This reader handles:
 //!
-//! - **Version 2 and 3 QCOW2 images**: the 68-byte common header is
+//! - **Version 2 and 3 QCOW2 images**: the 72-byte common header is
 //!   parsed for both; version-3 extended fields are accepted but not
 //!   acted upon.
 //! - **Unencrypted images only**: `encryption_method` must be 0.
@@ -112,16 +112,13 @@ impl From<io::Error> for Error {
 
 // ── Header ────────────────────────────────────────────────────────────────────
 
-/// Parsed QCOW2 header fields we actually use.
+/// Parsed QCOW2 header — only the fields used after validation.
+///
+/// `version`, `cluster_bits`, and `encryption_method` are validated
+/// inside `read_header` and not stored; only `disk_size` is returned.
 struct Header {
-    /// `version`: 2 or 3.
-    version: u32,
-    /// `cluster_bits`: `cluster_size = 1 << cluster_bits`.
-    cluster_bits: u32,
-    /// `disk_size`: virtual disk size in bytes.
+    /// `disk_size`: virtual disk size in bytes (offset 24).
     disk_size: u64,
-    /// `encryption_method`: 0=none, 1=AES, 2=LUKS.
-    encryption_method: u32,
 }
 
 /// Read and validate a QCOW2 header from the current stream position.
@@ -166,12 +163,7 @@ fn read_header<R: Read + Seek>(r: &mut R) -> Result<Header, Error> {
         return Err(Error::Encrypted);
     }
 
-    Ok(Header {
-        version,
-        cluster_bits,
-        disk_size,
-        encryption_method,
-    })
+    Ok(Header { disk_size })
 }
 
 // ── Detection ─────────────────────────────────────────────────────────────────
@@ -225,13 +217,6 @@ fn detect_inner<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
 pub fn detect_and_parse<R: Read + Seek>(r: &mut R) -> Result<TreeNode, Error> {
     r.seek(SeekFrom::Start(0))?;
     let hdr = read_header(r)?;
-
-    // Suppress the unused-field warning for encryption_method (already
-    // validated in read_header; we don't need the value past that point).
-    let _ = hdr.encryption_method;
-    let _ = hdr.version;
-    let _ = hdr.cluster_bits;
-
     let disk_size = hdr.disk_size;
 
     let mut root = TreeNode::new_directory("/".to_string());
