@@ -138,6 +138,10 @@ required-features = ["vmdk"]
 name = "qcow2_round_trip"
 required-features = ["qcow2"]
 
+[[test]]
+name = "ntfs_round_trip"
+required-features = ["ntfs"]
+
 [profile.release]
 opt-level = 2
 lto = true
