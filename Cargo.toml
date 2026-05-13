@@ -134,6 +134,10 @@ required-features = ["vhd"]
 name = "vmdk_round_trip"
 required-features = ["vmdk"]
 
+[[test]]
+name = "qcow2_round_trip"
+required-features = ["qcow2"]
+
 [profile.release]
 opt-level = 2
 lto = true

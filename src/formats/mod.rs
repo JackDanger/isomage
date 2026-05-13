@@ -38,3 +38,6 @@ pub mod vhd;
 
 #[cfg(feature = "vmdk")]
 pub mod vmdk;
+
+#[cfg(feature = "qcow2")]
+pub mod qcow2;
