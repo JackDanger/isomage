@@ -223,7 +223,9 @@ fn read_mft_record<R: Read + Seek>(
         return Ok(None);
     }
 
-    apply_fixup(&mut buf);
+    if !apply_fixup(&mut buf) {
+        return Ok(None); // corrupted update-sequence; skip
+    }
 
     // Flags at offset 22: bit 0 = in-use.
     let flags = u16::from_le_bytes([buf[22], buf[23]]);
@@ -379,10 +381,18 @@ struct Run {
 /// Each entry begins with a 1-byte header whose high nibble is the byte-length
 /// of the cluster-count field and whose low nibble is the byte-length of the
 /// (signed) cluster-offset field. `0x00` is the end marker.
-fn decode_runlist(data: &[u8]) -> Vec<Run> {
+/// Decode a NTFS runlist into physical runs.
+///
+/// Returns `(runs, had_sparse)` where `had_sparse` is `true` when at least
+/// one sparse entry (off_size == 0) was encountered. Callers that want to set
+/// `file_location` must check `had_sparse` because a sparse+data runlist can
+/// yield a single physical run that does not actually cover the full logical
+/// extent.
+fn decode_runlist(data: &[u8]) -> (Vec<Run>, bool) {
     let mut runs = Vec::new();
     let mut pos = 0usize;
     let mut prev_lcn: i64 = 0;
+    let mut had_sparse = false;
 
     while pos < data.len() {
         let header = data[pos];
@@ -427,8 +437,10 @@ fn decode_runlist(data: &[u8]) -> Vec<Run> {
         };
 
         prev_lcn += delta;
-        // Sparse runs have off_size == 0; skip them (no physical location).
-        if off_size > 0 {
+        if off_size == 0 {
+            // Sparse run: logical zeros, no physical clusters.
+            had_sparse = true;
+        } else {
             runs.push(Run {
                 start_lcn: prev_lcn as u64,
                 length,
@@ -436,7 +448,7 @@ fn decode_runlist(data: &[u8]) -> Vec<Run> {
         }
     }
 
-    runs
+    (runs, had_sparse)
 }
 
 // ── Per-record info ────────────────────────────────────────────────────────────
@@ -463,6 +475,7 @@ fn extract_record_info(
     mft_num: u64,
     mft_record_abs_offset: u64,
     cluster_size: u64,
+    volume_base: u64,
 ) -> Option<RecordInfo> {
     let attrs = parse_attributes(buf);
 
@@ -489,9 +502,8 @@ fn extract_record_info(
         if attr_pos + 8 > buf.len() {
             break;
         }
-        let attr_length = u32::from_le_bytes(buf[attr_pos..attr_pos + 4].try_into().unwrap());
-        // attr_type sanity check.
-        if attr_length == ATTR_END {
+        let attr_type_check = u32::from_le_bytes(buf[attr_pos..attr_pos + 4].try_into().unwrap());
+        if attr_type_check == ATTR_END {
             break;
         }
         let attr_length =
@@ -543,10 +555,15 @@ fn extract_record_info(
                         let runlist_offset =
                             u16::from_le_bytes([nr_slice[32], nr_slice[33]]) as usize;
                         if runlist_offset < nr_slice.len() {
-                            let runs = decode_runlist(&nr_slice[runlist_offset..]);
-                            // Single-run files get a file_location.
-                            if runs.len() == 1 {
-                                file_location = Some(runs[0].start_lcn * cluster_size);
+                            let (runs, had_sparse) =
+                                decode_runlist(&nr_slice[runlist_offset..]);
+                            // Single contiguous non-sparse run gets a file_location.
+                            // Include the volume base offset for images embedded in
+                            // a larger file (e.g. NTFS inside a partition image).
+                            if runs.len() == 1 && !had_sparse {
+                                file_location = Some(
+                                    volume_base + runs[0].start_lcn * cluster_size,
+                                );
                             }
                         }
                     }
@@ -699,17 +716,20 @@ pub fn detect_and_parse<R: Read + Seek>(file: &mut R) -> Result<TreeNode, Error>
 
         match read_mft_record(file, record_offset, boot.mft_record_size)? {
             None => {
-                // Stop at first unreadable / non-FILE record beyond the system range.
-                if mft_num >= SYSTEM_RECORD_COUNT {
-                    break;
-                }
+                // Free / unused MFT slot or UnexpectedEof. Real volumes have free
+                // slots interspersed, so we cannot stop here. We rely on the
+                // 1-million guard below instead of breaking on the first None.
             }
             Some(buf) => {
                 // Skip system metadata files (0–11).
                 if mft_num >= SYSTEM_RECORD_COUNT {
-                    if let Some(info) =
-                        extract_record_info(&buf, mft_num, record_abs, boot.cluster_size)
-                    {
+                    if let Some(info) = extract_record_info(
+                        &buf,
+                        mft_num,
+                        record_abs,
+                        boot.cluster_size,
+                        base,
+                    ) {
                         // Skip the root directory record itself (record 5) from
                         // the flat list; we'll handle it as the tree root.
                         if mft_num != ROOT_MFT_RECORD {
@@ -1046,7 +1066,8 @@ mod tests {
     fn decode_runlist_single_run() {
         // Header 0x11: len_size=1, off_size=1. Count=8, delta=+3.
         let data = [0x11u8, 8, 3, 0x00];
-        let runs = decode_runlist(&data);
+        let (runs, had_sparse) = decode_runlist(&data);
+        assert!(!had_sparse);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].start_lcn, 3);
         assert_eq!(runs[0].length, 8);
@@ -1057,7 +1078,8 @@ mod tests {
         // Run 1: 0x11 count=4 delta=+10 → LCN 10, len 4.
         // Run 2: 0x11 count=2 delta=+5  → LCN 15, len 2.
         let data = [0x11, 4, 10, 0x11, 2, 5, 0x00];
-        let runs = decode_runlist(&data);
+        let (runs, had_sparse) = decode_runlist(&data);
+        assert!(!had_sparse);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].start_lcn, 10);
         assert_eq!(runs[0].length, 4);
@@ -1071,7 +1093,8 @@ mod tests {
         // Run 2: count=4, delta=-5  → LCN 15.
         // -5 in two's complement as i8 = 0xFB.
         let data = [0x11, 8, 20, 0x11, 4, 0xFBu8, 0x00];
-        let runs = decode_runlist(&data);
+        let (runs, had_sparse) = decode_runlist(&data);
+        assert!(!had_sparse);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].start_lcn, 20);
         assert_eq!(runs[1].start_lcn, 15);
