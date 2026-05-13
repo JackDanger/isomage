@@ -19,10 +19,10 @@ use isomage::formats::vhd;
 
 /// Parse a VHD image from raw bytes and return the root TreeNode.
 fn parse_image(bytes: &[u8]) -> isomage::TreeNode {
-    let mut c = Cursor::new(bytes.to_vec());
+    let mut c = Cursor::new(bytes);
     vhd::detect(&mut c).expect("vhd::detect returned Err for a freshly-minted VHD");
-    let mut c2 = Cursor::new(bytes.to_vec());
-    vhd::detect_and_parse(&mut c2).expect("vhd::detect_and_parse failed")
+    c.set_position(0);
+    vhd::detect_and_parse(&mut c).expect("vhd::detect_and_parse failed")
 }
 
 // ── Test 1: Fixed VHD detection ───────────────────────────────────────────────
