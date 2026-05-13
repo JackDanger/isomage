@@ -223,8 +223,12 @@ fn detect_inner<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
 pub fn detect_and_parse<R: Read + Seek>(r: &mut R) -> Result<TreeNode, Error> {
     let header = read_header(r)?;
 
-    // Virtual disk size in bytes.
-    let virtual_size = header.capacity * SECTOR_SIZE;
+    // Virtual disk size in bytes. Use checked_mul to catch corrupt headers
+    // that would overflow a u64 (e.g. capacity = u64::MAX / 512 + 1).
+    let virtual_size = header
+        .capacity
+        .checked_mul(SECTOR_SIZE)
+        .ok_or(Error::BadMagic)?;
 
     let mut root = TreeNode::new_directory("/".to_string());
 
