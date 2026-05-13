@@ -59,12 +59,13 @@ jobs:
           cargo build --no-default-features --features ext
           cargo build --no-default-features --features squashfs
           cargo build --no-default-features --features vhd
+          cargo build --no-default-features --features vmdk
       # All-features test. Round-trip binaries skip on macOS without
       # format tools and run for real on the round-trip job.
       - name: Test (all v3.0 features enabled)
-        run: cargo test --features mbr,gpt,raw,ext,squashfs,vhd,mmap,simd
+        run: cargo test --features mbr,gpt,raw,ext,squashfs,vhd,vmdk,mmap,simd
       - name: Doc-tests
-        run: cargo test --doc --features mbr,gpt,raw,ext,squashfs,vhd,mmap,simd
+        run: cargo test --doc --features mbr,gpt,raw,ext,squashfs,vhd,vmdk,mmap,simd
       # Compile-check the bench harness even though we don't run it
       # here (criterion benches are non-deterministic on shared
       # runners). Regressions in the bench code itself surface here.
@@ -133,7 +134,7 @@ jobs:
             sevenzip || true
 
       - name: Build round-trip tests
-        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd --tests
+        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd,vmdk --tests
 
       - name: Run round-trip tests (Ubuntu strict)
         if: runner.os == 'Linux'
@@ -145,7 +146,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd,vmdk --test "$bin"
           done
 
       - name: Run round-trip tests (macOS, non-strict)
@@ -157,7 +158,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd,vmdk --test "$bin"
           done
 
   # ---------------------------------------------------------------------
@@ -214,7 +215,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,ext,squashfs,vhd,vmdk --test "$bin"
           done
 
   # ---------------------------------------------------------------------
@@ -332,10 +333,10 @@ jobs:
         run: cargo build --lib --no-default-features
       - name: cargo build --lib (every feature combo we ship)
         run: |
-          for feat in iso udf mmap simd mbr gpt raw ext squashfs vhd write; do
+          for feat in iso udf mmap simd mbr gpt raw ext squashfs vhd vmdk write; do
             cargo build --lib --no-default-features --features "$feat"
           done
-          cargo build --lib --features mmap,simd,mbr,gpt,raw,ext,squashfs,vhd
+          cargo build --lib --features mmap,simd,mbr,gpt,raw,ext,squashfs,vhd,vmdk
 
   # ---------------------------------------------------------------------
   # Known-vulnerable dependencies. With zero direct deps the surface is

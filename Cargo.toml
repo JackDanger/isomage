@@ -130,6 +130,10 @@ required-features = ["squashfs"]
 name = "vhd_round_trip"
 required-features = ["vhd"]
 
+[[test]]
+name = "vmdk_round_trip"
+required-features = ["vmdk"]
+
 [profile.release]
 opt-level = 2
 lto = true
