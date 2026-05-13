@@ -7,9 +7,10 @@
 //! - **Fixed VHDs**: virtual disk data starts at byte 0; the footer
 //!   is the last 512 bytes of the file. Reported as a single extent
 //!   with `file_location = Some(0)`.
-//! - **Dynamic VHDs**: footer at byte 0, dynamic disk header at byte
-//!   512, Block Allocation Table follows. Data is fragmented across
-//!   BAT-indexed blocks. Reported with `file_location = None`.
+//! - **Dynamic VHDs**: footer *copy* at byte 0 (the authoritative footer
+//!   is the last 512 bytes), dynamic disk header at byte 512, Block
+//!   Allocation Table follows. Data is fragmented across BAT-indexed
+//!   blocks. Reported with `file_location = None`.
 //!
 //! **Differencing VHDs** (disk_type 4) are not supported and return
 //! `Error::UnsupportedType(4)`. Parent resolution requires traversing
@@ -87,6 +88,8 @@ pub enum Error {
     /// `disk_type` is not 2 (Fixed) or 3 (Dynamic). The value is included
     /// for diagnostic purposes.
     UnsupportedType(u32),
+    /// Dynamic Disk Header cookie is not `b"cxsparse"`.
+    BadDynamicHeader,
     /// Underlying I/O error.
     Io(io::Error),
 }
@@ -101,6 +104,9 @@ impl std::fmt::Display for Error {
                 f,
                 "VHD disk_type {t} is not supported (only Fixed=2, Dynamic=3)"
             ),
+            Error::BadDynamicHeader => {
+                write!(f, "VHD Dynamic Disk Header cookie b\"cxsparse\" not found")
+            }
             Error::Io(e) => write!(f, "VHD I/O error: {e}"),
         }
     }
@@ -306,10 +312,7 @@ fn parse_dynamic<R: Read + Seek>(r: &mut R, footer: &Footer, file_len: u64) -> R
 
     // Verify the Dynamic Disk Header cookie.
     if &hdr[0..8] != DYN_HEADER_COOKIE {
-        return Err(Error::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "VHD Dynamic Disk Header cookie b\"cxsparse\" not found",
-        )));
+        return Err(Error::BadDynamicHeader);
     }
 
     // For Dynamic VHDs we report the virtual size without mapping blocks.
