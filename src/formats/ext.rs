@@ -399,7 +399,11 @@ fn parse_leaf_extents(data: &[u8], entries: u16) -> Vec<Extent> {
         let phys = (ee_start_hi << 32) | ee_start_lo;
         let unwritten = ee_len & 0x8000 != 0;
         let len = ee_len & 0x7FFF;
-        out.push(Extent { len, phys, unwritten });
+        out.push(Extent {
+            len,
+            phys,
+            unwritten,
+        });
     }
     out
 }
