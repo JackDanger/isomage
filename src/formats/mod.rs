@@ -32,3 +32,9 @@ pub mod ext;
 
 #[cfg(feature = "squashfs")]
 pub mod squashfs;
+
+#[cfg(feature = "vhd")]
+pub mod vhd;
+
+#[cfg(feature = "vmdk")]
+pub mod vmdk;

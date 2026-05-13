@@ -13,9 +13,9 @@
 //!   "64bit" feature variants).
 //! - Inode table reads for directories and regular files.
 //! - Extent tree traversal (ext4, `EXT4_EXTENTS_FL`), up to depth 5.
-//! - Classical block pointers: direct (i_block[0..11]), single-indirect
-//!   (i_block[12]), double-indirect (i_block[13]), and triple-indirect
-//!   (i_block[14]).
+//! - Classical block pointers: direct (i\_block\[0..11\]), single-indirect
+//!   (i\_block\[12\]), double-indirect (i\_block\[13\]), and triple-indirect
+//!   (i\_block\[14\]).
 //! - Directory entry scanning (linear and htree-transparent: we walk the
 //!   raw data blocks, so HTree is transparent).
 //! - `INCOMPAT_FILETYPE` directories (file_type byte in each entry).
