@@ -72,7 +72,7 @@ The current release hardens these specific surfaces:
 - Read loops keep file lengths as `u64` and clamp to a small `usize`
   chunk size before casting, so 32-bit targets can extract files
   larger than 4 GB without silent truncation.
-- All parser code paths return `io::Error` on invalid input. If you
+- All parser code paths return `Err` (never panic) on invalid input. If you
   find a panic on a crafted ISO, that's a bug worth reporting.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full list of

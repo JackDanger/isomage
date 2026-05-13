@@ -41,3 +41,6 @@ pub mod vmdk;
 
 #[cfg(feature = "qcow2")]
 pub mod qcow2;
+
+#[cfg(feature = "ntfs")]
+pub mod ntfs;

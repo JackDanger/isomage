@@ -573,7 +573,9 @@ fn parse_directory(
     let buffer = if let Some(data) = alloc.inline_data {
         data
     } else {
-        let mut buf = Vec::with_capacity(alloc.total_length as usize);
+        let cap = usize::try_from(alloc.total_length)
+            .map_err(|_| format!("directory too large: {} bytes", alloc.total_length))?;
+        let mut buf = Vec::with_capacity(cap);
         for extent in &alloc.extents {
             file.seek(SeekFrom::Start(
                 (partition_start + extent.location as u64) * SECTOR_SIZE,
