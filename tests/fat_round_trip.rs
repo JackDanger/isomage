@@ -76,7 +76,9 @@ fn empty_fat16() {
 
     let dir = tempfile::TempDir::new().unwrap();
     let img = dir.path().join("fat16.img");
-    preallocate(&img, 4 * 1024 * 1024);
+    // 32 MiB: ensures enough clusters (≥ 4086) for FAT16 regardless of the
+    // cluster size mkfs.fat picks for the given image size.
+    preallocate(&img, 32 * 1024 * 1024);
 
     tools::MKFS_VFAT
         .run(["-F", "16", img.to_str().unwrap()])
@@ -184,13 +186,16 @@ fn fat32_nested_directory() {
     std::fs::write(src_root.join("file.txt"), b"top-level file\n").unwrap();
     std::fs::write(src_root.join("subdir").join("child.txt"), b"nested file\n").unwrap();
 
-    // `mcopy -s -i image.img src/. ::/` copies the tree recursively.
+    // Copy the top-level file and the subdirectory separately. Using
+    // `src/.` as a source makes mcopy try to create a `.` entry, which FAT
+    // forbids. Instead, list each item explicitly; `-s` recurses into dirs.
     MCOPY
         .run([
             "-s",
             "-i",
             img.to_str().unwrap(),
-            src_root.join(".").to_str().unwrap(),
+            src_root.join("file.txt").to_str().unwrap(),
+            src_root.join("subdir").to_str().unwrap(),
             "::/",
         ])
         .expect("mcopy invocation failed")

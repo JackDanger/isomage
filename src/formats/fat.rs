@@ -240,7 +240,13 @@ fn read_bpb<R: Read + Seek>(file: &mut R) -> Result<Context, Error> {
         .saturating_sub(reserved_sectors as u64 + num_fats as u64 * fat_size + root_dir_sectors);
     let total_clusters = (data_sectors / spc) as u32;
 
-    let fat_type = if total_clusters < 4085 {
+    // FAT32 is uniquely identified by root_entry_count == 0 AND fat_size_16 == 0.
+    // The cluster-count heuristic alone misclassifies small images formatted with
+    // `mkfs.fat -F 32` (e.g. 16 MiB with 4 KiB clusters → only ~4000 clusters,
+    // which is below the 65525 FAT32 threshold). Use the BPB fields first.
+    let fat_type = if root_entry_count == 0 && fat_size_16 == 0 && root_cluster_32 >= 2 {
+        FatType::Fat32
+    } else if total_clusters < 4085 {
         FatType::Fat12
     } else if total_clusters < 65525 {
         FatType::Fat16
