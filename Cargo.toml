@@ -154,6 +154,10 @@ required-features = ["wim"]
 name = "dmg_round_trip"
 required-features = ["dmg"]
 
+[[test]]
+name = "apfs_round_trip"
+required-features = ["apfs"]
+
 [profile.release]
 opt-level = 2
 lto = true
