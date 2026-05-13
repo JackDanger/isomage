@@ -47,3 +47,6 @@ pub mod ntfs;
 
 #[cfg(feature = "hfsplus")]
 pub mod hfsplus;
+
+#[cfg(feature = "wim")]
+pub mod wim;
