@@ -154,10 +154,13 @@ impl Superblock {
 fn read_superblock<R: Read + Seek>(file: &mut R, base_offset: u64) -> Result<Superblock, Error> {
     file.seek(SeekFrom::Start(base_offset + SUPERBLOCK_OFFSET))?;
     let mut sb = [0u8; 264]; // up to s_desc_size at offset 236+2=238, take 264 for safety
-    let n = file.read(&mut sb)?;
-    if n < 58 {
-        return Err(Error::TooShort);
-    }
+    file.read_exact(&mut sb).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::TooShort
+        } else {
+            Error::Io(e)
+        }
+    })?;
     let magic = u16::from_le_bytes([sb[56], sb[57]]);
     if magic != EXT_MAGIC {
         return Err(Error::BadSuperblock);
@@ -168,11 +171,14 @@ fn read_superblock<R: Read + Seek>(file: &mut R, base_offset: u64) -> Result<Sup
     let log_block_size = u32::from_le_bytes(sb[24..28].try_into().unwrap());
     let blocks_per_group = u32::from_le_bytes(sb[32..36].try_into().unwrap());
     let inodes_per_group = u32::from_le_bytes(sb[40..44].try_into().unwrap());
-    let rev_level = if n >= 80 {
-        u32::from_le_bytes(sb[76..80].try_into().unwrap())
-    } else {
-        0
-    };
+
+    // ext supports block sizes 1–64 KiB: log_block_size ∈ [0, 6].
+    // Values ≥ 64 would panic the left-shift below; values > 6 indicate corruption.
+    if log_block_size > 6 {
+        return Err(Error::BadSuperblock);
+    }
+
+    let rev_level = u32::from_le_bytes(sb[76..80].try_into().unwrap());
 
     // Sanity: blocks_per_group must be non-zero (it's a divisor in inode location calc).
     if blocks_per_group == 0 {
@@ -187,14 +193,10 @@ fn read_superblock<R: Read + Seek>(file: &mut R, base_offset: u64) -> Result<Sup
         return Err(Error::BadSuperblock);
     }
 
-    let (inode_size, feature_incompat, desc_size) = if rev_level >= 1 && n >= 238 {
+    let (inode_size, feature_incompat, desc_size) = if rev_level >= 1 {
         let inode_size = u16::from_le_bytes([sb[88], sb[89]]);
         let feature_incompat = u32::from_le_bytes(sb[96..100].try_into().unwrap());
-        let desc_size = if n >= 238 {
-            u16::from_le_bytes([sb[236], sb[237]])
-        } else {
-            32
-        };
+        let desc_size = u16::from_le_bytes([sb[236], sb[237]]);
         (inode_size, feature_incompat, desc_size)
     } else {
         // rev_level 0: fixed 128-byte inodes, no extents.
@@ -356,8 +358,9 @@ fn read_block<R: Read + Seek>(
 /// physical block phys.
 #[derive(Debug, Clone, Copy)]
 struct Extent {
-    len: u16,  // number of blocks (bit 15 = unwritten; mask 0x7FFF)
-    phys: u64, // physical starting block
+    len: u16,        // number of blocks (ee_len & 0x7FFF)
+    phys: u64,       // physical starting block
+    unwritten: bool, // bit 15 of ee_len: preallocated but not yet written
 }
 
 /// One internal node index entry: covers logical blocks starting at
@@ -394,8 +397,9 @@ fn parse_leaf_extents(data: &[u8], entries: u16) -> Vec<Extent> {
         let ee_start_hi = u16::from_le_bytes([data[off + 6], data[off + 7]]) as u64;
         let ee_start_lo = u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as u64;
         let phys = (ee_start_hi << 32) | ee_start_lo;
-        let len = ee_len & 0x7FFF; // mask unwritten bit (bit 15)
-        out.push(Extent { len, phys });
+        let unwritten = ee_len & 0x8000 != 0;
+        let len = ee_len & 0x7FFF;
+        out.push(Extent { len, phys, unwritten });
     }
     out
 }
@@ -670,13 +674,16 @@ fn single_run_location<R: Read + Seek>(
             .flat_map(|&w| w.to_le_bytes())
             .collect();
         let extents = collect_extents(file, sb, base_offset, &root_bytes, 5)?;
-        // Single contiguous run: exactly one extent whose block count covers
-        // the full file.
+        // Single contiguous run: exactly one non-unwritten extent whose block
+        // count covers the full file. Unwritten extents are preallocated but
+        // contain stale on-disk data; reading them would return garbage.
         if extents.len() == 1 {
             let ext = &extents[0];
-            let needed_blocks = inode.size.div_ceil(sb.block_size());
-            if ext.len as u64 >= needed_blocks {
-                return Ok(Some(base_offset + ext.phys * sb.block_size()));
+            if !ext.unwritten {
+                let needed_blocks = inode.size.div_ceil(sb.block_size());
+                if ext.len as u64 >= needed_blocks {
+                    return Ok(Some(base_offset + ext.phys * sb.block_size()));
+                }
             }
         }
         return Ok(None);
@@ -734,7 +741,7 @@ fn build_tree<R: Read + Seek>(
             }
         }
         Ok(Some(node))
-    } else if inode.is_reg() || inode.is_symlink() {
+    } else if inode.is_reg() {
         // Inline-data files: in tree but no location.
         if inode.is_inline() {
             return Ok(Some(TreeNode::new_file(name, inode.size)));
@@ -745,6 +752,12 @@ fn build_tree<R: Read + Seek>(
             None => TreeNode::new_file(name, inode.size),
         };
         Ok(Some(node))
+    } else if inode.is_symlink() {
+        // Fast symlinks store the target path in i_block directly; there are
+        // no data blocks. Non-fast symlinks do use blocks, but we can't
+        // reliably distinguish without reading more state. Never set
+        // file_location for symlinks to avoid returning a bogus offset.
+        Ok(Some(TreeNode::new_file(name, inode.size)))
     } else {
         // Block/char devices, FIFOs, sockets — skip.
         let _ = inode.file_type_char(); // suppress unused warning
