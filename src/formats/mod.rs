@@ -53,3 +53,6 @@ pub mod wim;
 
 #[cfg(feature = "dmg")]
 pub mod dmg;
+
+#[cfg(feature = "apfs")]
+pub mod apfs;
