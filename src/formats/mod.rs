@@ -29,3 +29,6 @@ pub mod raw;
 
 #[cfg(feature = "ext")]
 pub mod ext;
+
+#[cfg(feature = "squashfs")]
+pub mod squashfs;

@@ -122,6 +122,10 @@ required-features = ["gpt"]
 name = "ext_round_trip"
 required-features = ["ext"]
 
+[[test]]
+name = "squashfs_round_trip"
+required-features = ["squashfs"]
+
 [profile.release]
 opt-level = 2
 lto = true
