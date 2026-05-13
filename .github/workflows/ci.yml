@@ -275,7 +275,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features mbr,gpt,raw,ext,squashfs,mmap,simd -- -D warnings
 
   # ---------------------------------------------------------------------
   # rustdoc must build cleanly. This is the library's "public face" on

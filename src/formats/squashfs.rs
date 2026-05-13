@@ -208,6 +208,19 @@ impl Superblock {
         };
 
         let block_size = u32_at(12);
+
+        // Reject big-endian images: the superblock magic check accepts BE
+        // magic (0x68737173) but every subsequent parse uses LE byte order,
+        // which would produce garbage on a real BE image. Reject cleanly.
+        if !little_endian {
+            return Err(Error::BadMagic);
+        }
+
+        // block_size is a divisor in block_count_for; reject 0 to prevent panic.
+        if block_size == 0 {
+            return Err(Error::BadMagic);
+        }
+
         let flags = u16_at(24);
         let version_major = u16_at(28);
         let version_minor = u16_at(30);
