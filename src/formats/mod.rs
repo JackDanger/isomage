@@ -50,3 +50,6 @@ pub mod hfsplus;
 
 #[cfg(feature = "wim")]
 pub mod wim;
+
+#[cfg(feature = "dmg")]
+pub mod dmg;
