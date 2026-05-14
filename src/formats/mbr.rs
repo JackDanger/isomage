@@ -266,4 +266,51 @@ mod tests {
         assert_eq!(root.children[0].size, 1024 * 512);
         assert_eq!(root.children[0].file_location, Some(2048 * 512));
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("512") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_signature() {
+        let msg = format!("{}", Error::BadSignature);
+        assert!(
+            msg.contains("55AA") || msg.contains("signature"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_protective_mbr() {
+        let msg = format!("{}", Error::ProtectiveMbr);
+        assert!(
+            msg.contains("GPT") || msg.contains("protective"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(std::io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadSignature.source().is_none());
+        assert!(Error::ProtectiveMbr.source().is_none());
+    }
 }

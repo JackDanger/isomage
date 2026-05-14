@@ -686,4 +686,58 @@ mod tests {
         let decoded = utf16le_to_string(&encoded).unwrap();
         assert_eq!(decoded, s);
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("208") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(msg.contains("MSWIM") || msg.contains("magic"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_compressed() {
+        let msg = format!("{}", Error::Compressed);
+        assert!(
+            msg.contains("compress") || msg.contains("WIM"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_encoding() {
+        let msg = format!("{}", Error::BadEncoding);
+        assert!(
+            msg.contains("UTF") || msg.contains("encoding"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::Compressed.source().is_none());
+        assert!(Error::BadEncoding.source().is_none());
+    }
 }

@@ -497,4 +497,59 @@ mod tests {
             "cluster_bits=8 should fail with BadClusterBits(8)"
         );
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        assert!(
+            format!("{}", Error::TooShort).contains("72")
+                || format!("{}", Error::TooShort).contains("short")
+        );
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        assert!(
+            format!("{}", Error::BadMagic).contains("514649fb")
+                || format!("{}", Error::BadMagic).contains("magic")
+        );
+    }
+
+    #[test]
+    fn error_display_unsupported_version() {
+        assert!(format!("{}", Error::UnsupportedVersion(5)).contains('5'));
+    }
+
+    #[test]
+    fn error_display_encrypted() {
+        assert!(format!("{}", Error::Encrypted).contains("encrypt"));
+    }
+
+    #[test]
+    fn error_display_bad_cluster_bits() {
+        assert!(format!("{}", Error::BadClusterBits(7)).contains('7'));
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk");
+        assert!(format!("{}", Error::Io(io)).contains("disk"));
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::Encrypted.source().is_none());
+        assert!(Error::UnsupportedVersion(2).source().is_none());
+        assert!(Error::BadClusterBits(5).source().is_none());
+    }
 }

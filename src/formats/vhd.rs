@@ -637,4 +637,68 @@ mod tests {
             "differencing VHD should return UnsupportedType(4)"
         );
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("512") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(
+            msg.contains("conectix") || msg.contains("cookie"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_checksum() {
+        let msg = format!("{}", Error::BadChecksum);
+        assert!(
+            msg.contains("checksum") || msg.contains("sum"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_unsupported_type() {
+        let msg = format!("{}", Error::UnsupportedType(5));
+        assert!(msg.contains('5'), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_dynamic_header() {
+        let msg = format!("{}", Error::BadDynamicHeader);
+        assert!(
+            msg.contains("cxsparse") || msg.contains("dynamic"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::BadChecksum.source().is_none());
+        assert!(Error::UnsupportedType(2).source().is_none());
+        assert!(Error::BadDynamicHeader.source().is_none());
+    }
 }

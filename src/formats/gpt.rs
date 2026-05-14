@@ -298,4 +298,48 @@ mod tests {
         assert_eq!(sanitize("foo/bar"), "foo_bar");
         assert_eq!(sanitize("good-name_1.0"), "good-name_1.0");
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("short") || msg.contains("GPT"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_signature() {
+        let msg = format!("{}", Error::BadSignature);
+        assert!(
+            msg.contains("EFI PART") || msg.contains("signature"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_unsupported_entry_size() {
+        let msg = format!("{}", Error::UnsupportedEntrySize(64));
+        assert!(msg.contains("64"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(std::io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadSignature.source().is_none());
+        assert!(Error::UnsupportedEntrySize(128).source().is_none());
+    }
 }
