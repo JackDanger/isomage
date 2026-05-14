@@ -449,4 +449,72 @@ mod tests {
             "sparse VMDK disk.vmdk should have file_location=None (grain directory indirection)"
         );
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("512") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(
+            msg.contains("564d444b") || msg.contains("magic"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_unsupported_version() {
+        let msg = format!("{}", Error::UnsupportedVersion(42));
+        assert!(msg.contains("42"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_compressed() {
+        let msg = format!("{}", Error::Compressed);
+        assert!(
+            msg.contains("deflate") || msg.contains("compress"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk fail");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk fail"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = io::Error::other("src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::Compressed.source().is_none());
+        assert!(Error::UnsupportedVersion(1).source().is_none());
+    }
+
+    #[test]
+    fn detect_restores_position_on_failure() {
+        let img = vec![0u8; 512]; // bad magic
+        let mut c = Cursor::new(&img);
+        c.seek(SeekFrom::Start(10)).unwrap();
+        let _ = detect(&mut c);
+        assert_eq!(
+            c.stream_position().unwrap(),
+            10,
+            "cursor should be restored on failure"
+        );
+    }
 }

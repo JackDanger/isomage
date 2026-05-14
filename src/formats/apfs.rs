@@ -503,4 +503,121 @@ mod tests {
             "volume directory node should have no file_location"
         );
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(
+            msg.contains("too short") || msg.contains("short"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(msg.contains("NXSB") || msg.contains("magic"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_block_size() {
+        let msg = format!("{}", Error::BadBlockSize);
+        assert!(
+            msg.contains("block_size") || msg.contains("block"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::other("disk error");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk error"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = std::io::Error::other("src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::BadBlockSize.source().is_none());
+    }
+
+    // ── Edge cases ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn nx_superblock_rejects_block_size_too_large() {
+        let mut img = make_apfs_image("TestVol");
+        // Set block_size to 131072 (> MAX_BLOCK_SIZE=65536).
+        img[36..40].copy_from_slice(&131072u32.to_le_bytes());
+        let mut c = Cursor::new(&img);
+        assert!(
+            matches!(read_nx_superblock(&mut c), Err(Error::BadBlockSize)),
+            "block_size > MAX should be rejected"
+        );
+    }
+
+    #[test]
+    fn detect_and_parse_bad_apsb_uses_fallback_name() {
+        // fs_oid[0]=1 but block 1 has wrong APSB magic → fallback name "volume_1"
+        const BLOCK_SIZE: usize = 4096;
+        let mut img = vec![0u8; BLOCK_SIZE * 2];
+        img[32..36].copy_from_slice(&NXSB_MAGIC.to_le_bytes());
+        img[36..40].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
+        // fs_oid[0] = 1 (at offset 180)
+        img[180..188].copy_from_slice(&1u64.to_le_bytes());
+        // Block 1: wrong APSB magic (zeros)
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).expect("fallback parse should succeed");
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(
+            tree.children[0].name, "volume_1",
+            "bad APSB → fallback name"
+        );
+    }
+
+    #[test]
+    fn detect_and_parse_empty_volume_name_uses_fallback() {
+        // APSB with all-zero volname field → name.is_empty() → fallback
+        const BLOCK_SIZE: usize = 4096;
+        let mut img = vec![0u8; BLOCK_SIZE * 2];
+        img[32..36].copy_from_slice(&NXSB_MAGIC.to_le_bytes());
+        img[36..40].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
+        img[180..188].copy_from_slice(&1u64.to_le_bytes()); // fs_oid[0] = 1 (offset 180)
+                                                            // Block 1: valid APSB magic but empty volname (all zeros = null terminator at [0])
+        img[BLOCK_SIZE + 32..BLOCK_SIZE + 36].copy_from_slice(&APSB_MAGIC.to_le_bytes());
+        // volname at BLOCK_SIZE + APSB_VOLNAME_OFFSET is all zeros = empty string
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).expect("empty name parse should succeed");
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(
+            tree.children[0].name, "volume_1",
+            "empty volname → fallback"
+        );
+    }
+
+    #[test]
+    fn nx_superblock_multiple_volumes() {
+        // Image with two non-zero fs_oids
+        const BLOCK_SIZE: usize = 4096;
+        let mut img = vec![0u8; BLOCK_SIZE * 3];
+        img[32..36].copy_from_slice(&NXSB_MAGIC.to_le_bytes());
+        img[36..40].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
+        img[180..188].copy_from_slice(&1u64.to_le_bytes()); // fs_oid[0] = 1
+        img[188..196].copy_from_slice(&2u64.to_le_bytes()); // fs_oid[1] = 2
+        let mut c = Cursor::new(&img);
+        let nx = read_nx_superblock(&mut c).expect("parse");
+        assert_eq!(nx.fs_oids.len(), 2);
+        assert_eq!(nx.fs_oids[0], 1);
+        assert_eq!(nx.fs_oids[1], 2);
+    }
 }
