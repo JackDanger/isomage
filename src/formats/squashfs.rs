@@ -1329,4 +1329,27 @@ mod tests {
         let result = parse_inode_body(&body, INODE_DIR, 4096);
         assert!(matches!(result, Err(Error::Io(_))));
     }
+
+    // ── Big-endian magic rejected (line 216) ─────────────────────────────────
+
+    #[test]
+    fn superblock_read_big_endian_magic_returns_bad_magic() {
+        // MAGIC_BE bytes at offset 0 → recognized as BE magic but rejected
+        // by the !little_endian guard (big-endian images not supported).
+        let mut data = vec![0u8; 200];
+        data[0..4].copy_from_slice(&MAGIC_BE.to_be_bytes());
+        let mut c = Cursor::new(data);
+        let result = Superblock::read(&mut c);
+        assert!(matches!(result, Err(Error::BadMagic)));
+    }
+
+    #[test]
+    fn detect_inner_big_endian_magic_returns_ok() {
+        // detect_inner accepts both LE and BE magic — it only checks bytes 0..4.
+        let mut data = vec![0u8; 4];
+        data[0..4].copy_from_slice(&MAGIC_BE.to_be_bytes());
+        let mut c = Cursor::new(data);
+        // detect_inner accepts be magic as Ok()
+        assert!(matches!(detect_inner(&mut c), Ok(())));
+    }
 }
