@@ -519,6 +519,59 @@ mod tests {
     }
 
     #[test]
+    fn detect_rejects_full_block_without_ustar_magic() {
+        // 512-byte block with no ustar magic → NotTar (line 361 in detect).
+        let buf = [0xAAu8; 512];
+        let mut c = Cursor::new(&buf);
+        assert!(matches!(detect(&mut c), Err(Error::NotTar)));
+    }
+
+    #[test]
+    fn slash_only_entry_skipped_in_build_tree() {
+        // An entry whose name is "/" trims to "" → skipped; tree has no children.
+        let tar = make_ustar("/", b"data");
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse ok");
+        assert_eq!(root.children.len(), 0);
+    }
+
+    #[test]
+    fn pax_size_override() {
+        // PAX entry with a "size" key; that override becomes pending_size
+        // for the next entry.
+        let pax_body = b"14 size=99999\n";
+        let mut buf = Vec::new();
+
+        // PAX header block (typeflag='x').
+        let mut hdr = [0u8; 512];
+        hdr[..9].copy_from_slice(b"pax.attrs");
+        let size_str = format!("{:011o}\0", pax_body.len());
+        hdr[124..136].copy_from_slice(size_str.as_bytes());
+        hdr[156] = b'x'; // PAX local
+        hdr[257..263].copy_from_slice(b"ustar\0");
+        hdr[263..265].copy_from_slice(b"00");
+        hdr[148..156].fill(b' ');
+        let ck: u32 = hdr.iter().map(|&b| b as u32).sum();
+        hdr[148..156].copy_from_slice(format!("{:06o}\0 ", ck).as_bytes());
+        buf.extend_from_slice(&hdr);
+
+        // PAX body block (padded to 512).
+        let mut body_block = [0u8; 512];
+        body_block[..pax_body.len()].copy_from_slice(pax_body);
+        buf.extend_from_slice(&body_block);
+
+        // Actual file entry (small data, but PAX says size=99999).
+        // We just verify the tree entry exists; the size comes from PAX.
+        buf.extend_from_slice(&make_ustar("real.txt", b"tiny"));
+
+        let mut c = Cursor::new(&buf);
+        let root = detect_and_parse(&mut c).expect("parse ok");
+        let node = root.find_node("/real.txt").expect("real.txt missing");
+        // The PAX size override should be applied.
+        assert_eq!(node.size, 99999);
+    }
+
+    #[test]
     fn nested_path_from_name() {
         let tar = make_ustar("subdir/file.txt", b"data");
         let mut c = Cursor::new(&tar);
@@ -896,5 +949,63 @@ mod tests {
         let root = detect_and_parse(&mut c).expect("parse failed");
         assert!(root.find_node("/first.txt").is_some());
         assert!(root.find_node("/second.txt").is_some());
+    }
+
+    // ── write unit tests ──────────────────────────────────────────────────────
+
+    #[cfg(feature = "write")]
+    mod write_tests {
+        use super::super::{detect_and_parse, write};
+        use std::io::Cursor;
+
+        #[test]
+        fn write_single_file_round_trips() {
+            let mut buf = Vec::new();
+            write(&mut buf, &[("hello.txt", b"Hello, world!")]).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = detect_and_parse(&mut c).expect("round-trip parse");
+            let node = root.find_node("/hello.txt").expect("hello.txt missing");
+            assert_eq!(node.size, 13);
+            assert!(node.file_location.is_some());
+        }
+
+        #[test]
+        fn write_multiple_files_round_trips() {
+            let entries = [("a.txt", b"aaa" as &[u8]), ("b.txt", b"bbbb")];
+            let mut buf = Vec::new();
+            write(&mut buf, &entries).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = detect_and_parse(&mut c).expect("round-trip parse");
+            assert!(root.find_node("/a.txt").is_some());
+            assert!(root.find_node("/b.txt").is_some());
+        }
+
+        #[test]
+        fn write_empty_archive_is_valid() {
+            let mut buf = Vec::new();
+            write(&mut buf, &[]).unwrap();
+            // Empty archive = 1024 zero bytes.
+            assert_eq!(buf.len(), 1024);
+        }
+
+        #[test]
+        fn write_data_not_multiple_of_block_pads_correctly() {
+            // "abc" (3 bytes) must be padded to 512 bytes in the data area.
+            let mut buf = Vec::new();
+            write(&mut buf, &[("f.txt", b"abc")]).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = detect_and_parse(&mut c).expect("round-trip parse");
+            let node = root.find_node("/f.txt").expect("f.txt missing");
+            assert_eq!(node.size, 3);
+        }
+
+        #[test]
+        fn write_nested_path_round_trips() {
+            let mut buf = Vec::new();
+            write(&mut buf, &[("docs/readme.txt", b"readme")]).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = detect_and_parse(&mut c).expect("nested parse");
+            assert!(root.find_node("/docs/readme.txt").is_some());
+        }
     }
 }

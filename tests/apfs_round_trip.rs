@@ -20,6 +20,7 @@ mod common;
 
 use std::io::Cursor;
 
+#[cfg(target_os = "macos")]
 use common::tools;
 
 use isomage::formats::apfs;
