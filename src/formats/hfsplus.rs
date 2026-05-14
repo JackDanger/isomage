@@ -1267,4 +1267,489 @@ mod tests {
         let names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["a.txt", "m.txt", "z.txt"]);
     }
+
+    // ── detect / parse_volume_header: too-short image ─────────────────────────
+
+    #[test]
+    fn detect_too_short_image_returns_too_short() {
+        // Image of exactly 1024 bytes; seek to 1024 succeeds but reading 2 bytes fails.
+        let buf = vec![0u8; 1024];
+        let mut c = Cursor::new(&buf);
+        assert!(matches!(detect(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn parse_volume_header_too_short_image_returns_too_short() {
+        let buf = vec![0u8; 1024];
+        let mut c = Cursor::new(&buf);
+        assert!(matches!(parse_volume_header(&mut c), Err(Error::TooShort)));
+    }
+
+    // ── detect_and_parse: empty catalog (no extents) ──────────────────────────
+
+    #[test]
+    fn detect_and_parse_empty_catalog_returns_empty_root() {
+        // cat_file has all-zero extents → first_extent_offset returns None → empty tree.
+        let buf = make_volume_header_bytes(HFS_PLUS_MAGIC, 4, 0, 0, 4096);
+        let mut c = Cursor::new(&buf);
+        let tree = detect_and_parse(&mut c).expect("empty catalog should succeed");
+        assert_eq!(tree.name, "/");
+        assert!(tree.children.is_empty());
+    }
+
+    // ── detect_and_parse: catalog B-tree header node validation ──────────────
+
+    /// Build a minimal HFS+ image with a catalog file at block 4 (byte 2048),
+    /// containing a 120-byte header node with configurable fields.
+    fn make_hfsplus_with_btree_header(
+        node_kind: u8,
+        num_records: u16,
+        btree_node_size: u16,
+        first_leaf: u32,
+    ) -> Vec<u8> {
+        let block_size = 512u32;
+        let cat_block = 4u32;
+        let mut img = vec![0u8; 2168]; // 2048 + 120 bytes
+
+        // Volume header at 1024
+        let h = &mut img[1024..1536];
+        h[0..2].copy_from_slice(&HFS_PLUS_MAGIC.to_be_bytes());
+        h[2..4].copy_from_slice(&4u16.to_be_bytes());
+        h[40..44].copy_from_slice(&block_size.to_be_bytes());
+        // cat_file.extents[0] at VH+272+16 and VH+272+20: (cat_block, 1)
+        h[288..292].copy_from_slice(&cat_block.to_be_bytes()); // start_block
+        h[292..296].copy_from_slice(&1u32.to_be_bytes()); // block_count
+
+        // Catalog at byte 2048: 14-byte node descriptor + 106-byte BTHeaderRec
+        let cat = &mut img[2048..2168];
+        cat[8] = node_kind; // node_kind
+        cat[10..12].copy_from_slice(&num_records.to_be_bytes()); // num_records
+        cat[24..28].copy_from_slice(&first_leaf.to_be_bytes()); // BTHeaderRec.first_leaf_node
+        cat[32..34].copy_from_slice(&btree_node_size.to_be_bytes()); // BTHeaderRec.node_size
+
+        img
+    }
+
+    #[test]
+    fn detect_and_parse_bad_catalog_node_kind_returns_error() {
+        let img = make_hfsplus_with_btree_header(0x00, 1, 512, 0);
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::BadCatalog)));
+    }
+
+    #[test]
+    fn detect_and_parse_header_node_zero_records_returns_error() {
+        let img = make_hfsplus_with_btree_header(BTREE_HEADER_NODE, 0, 512, 0);
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn detect_and_parse_catalog_node_size_too_small_returns_error() {
+        let img = make_hfsplus_with_btree_header(BTREE_HEADER_NODE, 1, 256, 0);
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::BadCatalog)));
+    }
+
+    #[test]
+    fn detect_and_parse_empty_leaf_chain_returns_empty_root() {
+        // first_leaf_node = 0 → empty catalog, returns empty tree immediately.
+        let img = make_hfsplus_with_btree_header(BTREE_HEADER_NODE, 1, 512, 0);
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).expect("empty leaf chain should succeed");
+        assert!(tree.children.is_empty());
+    }
+
+    // ── parse_leaf_node_records: edge cases ───────────────────────────────────
+
+    #[test]
+    fn parse_leaf_node_unknown_record_type_skipped() {
+        let key = make_catalog_key(HFS_ROOT_FOLDER_CNID, "x");
+        let mut rec = vec![0u8; 20];
+        rec[0..2].copy_from_slice(&0xFFFFu16.to_be_bytes()); // unknown record type
+        let node = make_leaf_node(&key, &rec);
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty(), "unknown record type must be skipped");
+    }
+
+    #[test]
+    fn parse_leaf_node_rec_start_past_node_size_skipped() {
+        let mut node = vec![0u8; 512];
+        // Offset table at node[510..512]; write rec_start = 600 (> 512 = node_size)
+        node[510..512].copy_from_slice(&600u16.to_be_bytes());
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty(), "out-of-bounds rec_start must be skipped");
+    }
+
+    #[test]
+    fn parse_leaf_node_rec_data_under_six_bytes_skipped() {
+        let mut node = vec![0u8; 512];
+        // rec_start = 508 → rec_data = node[508..] = 4 bytes < 6
+        node[510..512].copy_from_slice(&508u16.to_be_bytes());
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_leaf_node_key_length_under_six_skipped() {
+        let mut node = vec![0u8; 512];
+        // rec_start = 14; key_length = 3 < 6 → skip
+        node[510..512].copy_from_slice(&14u16.to_be_bytes());
+        node[14..16].copy_from_slice(&3u16.to_be_bytes()); // key_length
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_leaf_node_folder_record_too_short_skipped() {
+        // Place rec_start=500 so rec_data=node[500..512]=12 bytes.
+        // key_length=6 (parent4+namelen2, name_len=0).
+        // data_off=(2+6+1)&!1=8; data=rec_data[8..]=4 bytes < 12 → skip.
+        let node_size = 512usize;
+        let mut node = vec![0u8; node_size];
+        let rec_start = 500usize;
+        node[510..512].copy_from_slice(&(rec_start as u16).to_be_bytes());
+        node[500..502].copy_from_slice(&6u16.to_be_bytes()); // key_length=6
+        node[502..506].copy_from_slice(&HFS_ROOT_FOLDER_CNID.to_be_bytes()); // parent_cnid
+                                                                             // name_length=0 at [506..508] (stays zero)
+                                                                             // data at offset 8: node[508..512] = 4 bytes; record_type=FOLDER
+        node[508..510].copy_from_slice(&RECORD_TYPE_FOLDER.to_be_bytes());
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty(), "short folder record data must be skipped");
+    }
+
+    #[test]
+    fn parse_leaf_node_file_record_too_short_skipped() {
+        // Place rec_start=490 so rec_data=node[490..512]=22 bytes.
+        // key_length=6, data_off=8; data=rec_data[8..]=14 bytes < 168 → skip.
+        let node_size = 512usize;
+        let mut node = vec![0u8; node_size];
+        let rec_start = 490usize;
+        node[510..512].copy_from_slice(&(rec_start as u16).to_be_bytes());
+        node[490..492].copy_from_slice(&6u16.to_be_bytes()); // key_length=6
+        node[492..496].copy_from_slice(&HFS_ROOT_FOLDER_CNID.to_be_bytes()); // parent_cnid
+                                                                             // name_length=0 at [496..498] (stays zero)
+                                                                             // data at offset 8: node[498..512] = 14 bytes; record_type=FILE
+        node[498..500].copy_from_slice(&RECORD_TYPE_FILE.to_be_bytes());
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty(), "short file record data must be skipped");
+    }
+
+    #[test]
+    fn parse_leaf_node_file_multi_extent_no_location() {
+        // File with two extents → is_single_extent() = false → file_location = None.
+        let key = make_catalog_key(HFS_ROOT_FOLDER_CNID, "big.dat");
+        let mut rec = vec![0u8; 248];
+        rec[0..2].copy_from_slice(&RECORD_TYPE_FILE.to_be_bytes());
+        rec[8..12].copy_from_slice(&99u32.to_be_bytes()); // cnid
+        let fork_off = 88;
+        rec[fork_off..fork_off + 8].copy_from_slice(&4096u64.to_be_bytes()); // logical_size
+        rec[fork_off + 12..fork_off + 16].copy_from_slice(&4u32.to_be_bytes()); // total_blocks=4
+        rec[fork_off + 16..fork_off + 20].copy_from_slice(&10u32.to_be_bytes()); // extent[0].start
+        rec[fork_off + 20..fork_off + 24].copy_from_slice(&2u32.to_be_bytes()); // extent[0].count=2
+        rec[fork_off + 24..fork_off + 28].copy_from_slice(&20u32.to_be_bytes()); // extent[1].start
+        rec[fork_off + 28..fork_off + 32].copy_from_slice(&2u32.to_be_bytes()); // extent[1].count=2
+        let node = make_leaf_node(&key, &rec);
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+        if let CatalogRecord::File { file_location, .. } = &out[0] {
+            assert!(
+                file_location.is_none(),
+                "multi-extent file should have no location"
+            );
+        } else {
+            panic!("expected File record");
+        }
+    }
+
+    // ── build_tree: subdirectory and orphan paths ─────────────────────────────
+
+    #[test]
+    fn build_tree_file_in_subdirectory() {
+        // File inside a subdirectory: covers cnid_path and find_by_path_mut.
+        let records = vec![
+            CatalogRecord::Folder {
+                parent_cnid: HFS_ROOT_FOLDER_CNID,
+                name: "docs".to_string(),
+                cnid: 10,
+            },
+            CatalogRecord::File {
+                parent_cnid: 10,
+                name: "readme.txt".to_string(),
+                cnid: 11,
+                file_length: 42,
+                file_location: Some(8192),
+            },
+        ];
+        let root = build_tree(&records, 512);
+        assert_eq!(root.children.len(), 1);
+        let dir = &root.children[0];
+        assert!(dir.is_directory);
+        assert_eq!(dir.name, "docs");
+        assert_eq!(dir.children.len(), 1);
+        assert_eq!(dir.children[0].name, "readme.txt");
+    }
+
+    #[test]
+    fn build_tree_orphan_directory_goes_to_pending() {
+        // Folder with unknown parent → lands in still_pending, silently dropped.
+        let records = vec![CatalogRecord::Folder {
+            parent_cnid: 9999, // no such parent in records
+            name: "orphan".to_string(),
+            cnid: 50,
+        }];
+        let root = build_tree(&records, 512);
+        // Orphan subdirectory not attached to root.
+        assert!(root.children.is_empty());
+    }
+
+    // ── read_catalog_leaf_records: leaf-walk loop ─────────────────────────────
+
+    /// Build an HFS+ image with a catalog at block 4 (byte 2048) and one leaf
+    /// node at index `first_leaf` inside the catalog area.
+    fn make_hfsplus_with_leaf_node(
+        leaf_node_kind: u8,
+        leaf_f_link: u32,
+        leaf_num_records: u16,
+    ) -> Vec<u8> {
+        let block_size = 512u32;
+        let cat_block = 4u32;
+        let node_size = 512usize;
+        // cat_offset=2048; header node at 2048..2560; leaf node at 2560..3072
+        let mut img = vec![0u8; 3072];
+
+        let h = &mut img[1024..1536];
+        h[0..2].copy_from_slice(&HFS_PLUS_MAGIC.to_be_bytes());
+        h[2..4].copy_from_slice(&4u16.to_be_bytes());
+        h[40..44].copy_from_slice(&block_size.to_be_bytes());
+        h[288..292].copy_from_slice(&cat_block.to_be_bytes());
+        h[292..296].copy_from_slice(&1u32.to_be_bytes()); // block_count=1
+
+        // Header node at 2048: first 120 bytes are node descriptor + BTHeaderRec
+        let cat = &mut img[2048..2168];
+        cat[8] = BTREE_HEADER_NODE;
+        cat[10..12].copy_from_slice(&1u16.to_be_bytes()); // num_records=1
+        cat[24..28].copy_from_slice(&1u32.to_be_bytes()); // first_leaf=1
+        cat[32..34].copy_from_slice(&(node_size as u16).to_be_bytes()); // node_size=512
+
+        // Leaf node at 2048 + 512 = 2560 (node index 1)
+        let leaf = &mut img[2560..3072];
+        leaf[0..4].copy_from_slice(&leaf_f_link.to_be_bytes()); // f_link
+        leaf[8] = leaf_node_kind;
+        leaf[10..12].copy_from_slice(&leaf_num_records.to_be_bytes());
+
+        img
+    }
+
+    #[test]
+    fn detect_and_parse_single_leaf_node_walks_chain() {
+        // first_leaf=1, BTREE_LEAF_NODE, f_link=0, num_records=0.
+        // Exercises the entire read_catalog_leaf_records loop body.
+        let img = make_hfsplus_with_leaf_node(BTREE_LEAF_NODE, 0, 0);
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).expect("single leaf node walk should succeed");
+        assert!(tree.children.is_empty());
+    }
+
+    #[test]
+    fn detect_and_parse_non_leaf_kind_in_chain_breaks() {
+        // first_leaf=1, kind=0x00 (not LEAF), f_link=0 → enters the
+        // `kind != BTREE_LEAF_NODE` branch and breaks (no records, empty tree).
+        let img = make_hfsplus_with_leaf_node(0x00, 0, 0);
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).expect("non-leaf kind with f_link=0 should succeed");
+        assert!(tree.children.is_empty());
+    }
+
+    #[test]
+    fn detect_and_parse_non_leaf_then_leaf_follows_f_link() {
+        // Node 1: kind=0x00 (non-leaf), f_link=2 → lines 429-431 (continue to node 2).
+        // Node 2: kind=BTREE_LEAF_NODE, f_link=0 → normal leaf parse, break.
+        // Image: header at 2048..2560, node1 at 2560..3072, node2 at 3072..3584.
+        let block_size = 512u32;
+        let cat_block = 4u32;
+        let node_size = 512usize;
+        let mut img = vec![0u8; 3584];
+
+        let h = &mut img[1024..1536];
+        h[0..2].copy_from_slice(&HFS_PLUS_MAGIC.to_be_bytes());
+        h[2..4].copy_from_slice(&4u16.to_be_bytes());
+        h[40..44].copy_from_slice(&block_size.to_be_bytes());
+        h[288..292].copy_from_slice(&cat_block.to_be_bytes());
+        h[292..296].copy_from_slice(&1u32.to_be_bytes());
+
+        let cat = &mut img[2048..2168];
+        cat[8] = BTREE_HEADER_NODE;
+        cat[10..12].copy_from_slice(&1u16.to_be_bytes());
+        cat[24..28].copy_from_slice(&1u32.to_be_bytes()); // first_leaf=1
+        cat[32..34].copy_from_slice(&(node_size as u16).to_be_bytes());
+
+        // Node 1 at 2560: non-leaf kind, f_link=2
+        let node1 = &mut img[2560..3072];
+        node1[0..4].copy_from_slice(&2u32.to_be_bytes()); // f_link=2
+        node1[8] = 0x00; // not a leaf
+
+        // Node 2 at 3072: leaf, f_link=0
+        let node2 = &mut img[3072..3584];
+        node2[0..4].copy_from_slice(&0u32.to_be_bytes()); // f_link=0
+        node2[8] = BTREE_LEAF_NODE;
+        node2[10..12].copy_from_slice(&0u16.to_be_bytes()); // num_records=0
+
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).expect("non-leaf then leaf should succeed");
+        assert!(tree.children.is_empty());
+    }
+
+    // ── parse_leaf_node_records: remaining skip paths ─────────────────────────
+
+    #[test]
+    fn parse_leaf_node_records_tiny_node_breaks_early() {
+        // node_size=1, num_records=1: off_idx=saturating_sub(2)=0, 0+2=2 > 1 → break.
+        let mut out = Vec::new();
+        parse_leaf_node_records(&[0u8], 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_leaf_node_name_extends_past_rec_data_skipped() {
+        // rec_start=490, rec_data=22 bytes. key_length=6, name_len=10 →
+        // name_bytes_len=20, 8+20=28 > 22 → skip (line 485).
+        let mut node = vec![0u8; 512];
+        node[510..512].copy_from_slice(&490u16.to_be_bytes()); // offset table
+        node[490..492].copy_from_slice(&6u16.to_be_bytes()); // key_length=6
+        node[492..496].copy_from_slice(&HFS_ROOT_FOLDER_CNID.to_be_bytes()); // parent_cnid
+        node[496..498].copy_from_slice(&10u16.to_be_bytes()); // name_len=10 (=20 bytes)
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_leaf_node_data_off_past_end_skipped() {
+        // rec_start=459, rec_data=53 bytes. key_length=50, name_len=0 →
+        // data_off=(2+50+1)&!1=52, 53 < 52+2=54 → skip (line 494).
+        let mut node = vec![0u8; 512];
+        node[510..512].copy_from_slice(&459u16.to_be_bytes()); // offset table
+        node[459..461].copy_from_slice(&50u16.to_be_bytes()); // key_length=50
+        node[461..465].copy_from_slice(&HFS_ROOT_FOLDER_CNID.to_be_bytes()); // parent_cnid
+                                                                             // name_len=0 at [465..467] (stays zero)
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert!(out.is_empty());
+    }
+
+    // ── build_tree: orphaned file covers find_by_path_mut None path ───────────
+
+    #[test]
+    fn build_tree_file_with_orphaned_grandparent() {
+        // Folder A (cnid=10) has parent 9999 which is not in folder_map.
+        // A is orphaned in Pass 4 (never attached to root).
+        // File (parent=10) → cnid_path: get(10)=Some(("A",9999)), push "A",
+        // cur=9999 (line 590), get(9999)=None → break (line 592), path=["A"].
+        // find_by_path_mut(root, ["A"]): root has child "B" but not "A"
+        // → condition false (line 565) → return None (line 567). File dropped.
+        let records = vec![
+            CatalogRecord::Folder {
+                parent_cnid: HFS_ROOT_FOLDER_CNID,
+                name: "B".to_string(),
+                cnid: 20,
+            },
+            CatalogRecord::Folder {
+                parent_cnid: 9999,
+                name: "A".to_string(),
+                cnid: 10,
+            },
+            CatalogRecord::File {
+                parent_cnid: 10,
+                name: "x.txt".to_string(),
+                cnid: 30,
+                file_length: 1,
+                file_location: None,
+            },
+        ];
+        let root = build_tree(&records, 512);
+        // "B" is attached to root; "A" and "x.txt" are silently dropped.
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "B");
+    }
+
+    // ── read_catalog_leaf_records: TooShort and TooDeep paths ─────────────────
+
+    #[test]
+    fn detect_and_parse_leaf_node_read_too_short_returns_error() {
+        // Image just large enough for header node but NOT the leaf node:
+        // cat_offset=2048, header_node at 2048..2560, leaf at 2560 but image ends at 2560.
+        // read_exact for the leaf → UnexpectedEof → TooShort.
+        let block_size = 512u32;
+        let cat_block = 4u32;
+        let node_size = 512usize;
+        let mut img = vec![0u8; 2560]; // ends exactly where leaf would start
+
+        let h = &mut img[1024..1536];
+        h[0..2].copy_from_slice(&HFS_PLUS_MAGIC.to_be_bytes());
+        h[2..4].copy_from_slice(&4u16.to_be_bytes());
+        h[40..44].copy_from_slice(&block_size.to_be_bytes());
+        h[288..292].copy_from_slice(&cat_block.to_be_bytes());
+        h[292..296].copy_from_slice(&1u32.to_be_bytes());
+
+        let cat = &mut img[2048..2168];
+        cat[8] = BTREE_HEADER_NODE;
+        cat[10..12].copy_from_slice(&1u16.to_be_bytes());
+        cat[24..28].copy_from_slice(&1u32.to_be_bytes()); // first_leaf=1
+        cat[32..34].copy_from_slice(&(node_size as u16).to_be_bytes());
+
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn detect_and_parse_leaf_chain_too_deep_returns_error() {
+        // Two-leaf circular chain with logical_size=0 (max_nodes=1).
+        // Iteration 1: leaf1 (f_link=2, LEAF, num_records=0). first_leaf=2.
+        // Iteration 2: leaf2 (f_link=0, LEAF, num_records=0). first_leaf… wait,
+        // visited=2 > max_nodes=1 → TooDeep before reading leaf2!
+        //
+        // Image: 2048 + 512 (header) + 512 (leaf1) + 512 (leaf2) = 3584 bytes.
+        let block_size = 512u32;
+        let cat_block = 4u32;
+        let node_size = 512usize;
+        let mut img = vec![0u8; 3584];
+
+        let h = &mut img[1024..1536];
+        h[0..2].copy_from_slice(&HFS_PLUS_MAGIC.to_be_bytes());
+        h[2..4].copy_from_slice(&4u16.to_be_bytes());
+        h[40..44].copy_from_slice(&block_size.to_be_bytes());
+        h[288..292].copy_from_slice(&cat_block.to_be_bytes());
+        h[292..296].copy_from_slice(&1u32.to_be_bytes());
+        // logical_size stays zero → max_nodes = (0/512).min(MAX) + 1 = 1
+
+        // Header node at 2048 (cat_offset)
+        let cat = &mut img[2048..2168];
+        cat[8] = BTREE_HEADER_NODE;
+        cat[10..12].copy_from_slice(&1u16.to_be_bytes());
+        cat[24..28].copy_from_slice(&1u32.to_be_bytes()); // first_leaf=1
+        cat[32..34].copy_from_slice(&(node_size as u16).to_be_bytes());
+
+        // Leaf node 1 at 2048 + 512 = 2560 (index 1): f_link=2
+        let leaf1 = &mut img[2560..3072];
+        leaf1[0..4].copy_from_slice(&2u32.to_be_bytes()); // f_link=2
+        leaf1[8] = BTREE_LEAF_NODE;
+        leaf1[10..12].copy_from_slice(&0u16.to_be_bytes()); // num_records=0
+
+        // Leaf node 2 at 2048 + 1024 = 3072 (index 2): f_link=3 (points beyond image).
+        // Iteration 3 checks visited=2 > max_nodes=1 → TooDeep before seeking to node 3.
+        let leaf2 = &mut img[3072..3584];
+        leaf2[0..4].copy_from_slice(&3u32.to_be_bytes()); // f_link=3
+        leaf2[8] = BTREE_LEAF_NODE;
+
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooDeep)));
+    }
 }
