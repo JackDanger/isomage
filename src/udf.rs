@@ -1112,4 +1112,413 @@ mod tests {
         let root = parse_udf_verbose(&mut c, true).expect("parse should succeed");
         assert_eq!(root.name, "/");
     }
+
+    // ── Additional FID / parse_directory coverage ─────────────────────────────
+
+    /// Build a UDF image whose root directory FID buffer contains:
+    ///  - a zero-tag entry (4 bytes of zeros → tag_id==0 → skip 4 bytes)
+    ///  - a deleted file FID (file_characteristics & 0x04)
+    ///  - a valid "hello.txt" FID
+    fn make_udf_image_edge_fids() -> Vec<u8> {
+        let mut img = make_udf_image();
+
+        // Build the replacement FID buffer
+        let mut fids: Vec<u8> = Vec::new();
+
+        // 1) zero-tag entry: 4 zero bytes (tag_id=0 → skip path)
+        fids.extend_from_slice(&[0u8; 4]);
+
+        // 2) parent FID (file_characteristics=0x08)
+        let mut parent = vec![0u8; 40];
+        let mut tmp = parent.clone();
+        w16(&mut tmp, 0, 257);
+        tmp[18] = 0x08;
+        parent.copy_from_slice(&tmp);
+        fids.extend_from_slice(&parent);
+
+        // 3) deleted file FID (file_characteristics=0x04)
+        let del_name: Vec<u8> = {
+            let mut n = vec![8u8];
+            n.extend_from_slice(b"deleted.txt");
+            n
+        };
+        let del_len = del_name.len() as u8;
+        let del_total = 38 + del_len as usize;
+        let del_padded = (del_total + 3) & !3;
+        let mut del_fid = vec![0u8; del_padded];
+        w16(&mut del_fid, 0, 257);
+        del_fid[18] = 0x04; // DELETED
+        del_fid[19] = del_len;
+        del_fid[38..38 + del_name.len()].copy_from_slice(&del_name);
+        fids.extend_from_slice(&del_fid);
+
+        // 4) valid "hello.txt" FID → ICB points to sector 262 (location=2)
+        let name_raw: Vec<u8> = {
+            let mut n = vec![8u8];
+            n.extend_from_slice(b"hello.txt");
+            n
+        };
+        let len_fi = name_raw.len() as u8;
+        let total_unpadded = 38 + len_fi as usize;
+        let padded = (total_unpadded + 3) & !3;
+        let mut file_fid = vec![0u8; padded];
+        w16(&mut file_fid, 0, 257);
+        file_fid[18] = 0x00;
+        file_fid[19] = len_fi;
+        w32(&mut file_fid, 20, 512);
+        w32(&mut file_fid, 24, 2); // location = 2 → sector 262
+        w16(&mut file_fid, 28, 0);
+        file_fid[38..38 + name_raw.len()].copy_from_slice(&name_raw);
+        fids.extend_from_slice(&file_fid);
+
+        // Replace the root FE's inline FID data at sector 261
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3); // inline
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_deleted_fid_skipped() {
+        let img = make_udf_image_edge_fids();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("parse should succeed");
+        // "deleted.txt" should NOT appear; "hello.txt" should
+        assert!(root.find_node("/deleted.txt").is_none());
+        assert!(root.find_node("/hello.txt").is_some());
+    }
+
+    #[test]
+    fn parse_udf_deleted_fid_verbose() {
+        let img = make_udf_image_edge_fids();
+        let mut c = Cursor::new(img);
+        // verbose=true hits the eprintln! paths for zero-tag skip and found-file
+        let root = parse_udf_verbose(&mut c, true).expect("parse should succeed");
+        assert_eq!(root.name, "/");
+    }
+
+    /// Build a UDF image where a file FID's ICB points to a sector whose
+    /// tag_id is 0 (not a valid File Entry). This causes get_file_info to
+    /// return Err → parse_directory emits a zero-size TreeNode.
+    fn make_udf_image_bad_file_entry() -> Vec<u8> {
+        let mut img = make_udf_image();
+
+        // Build a FID buffer: parent + one file FID pointing to sector 265
+        // (location=5 within partition 0, which starts at sector 260).
+        // Sector 265 is all-zero → tag_id=0 → get_file_allocation returns Err.
+        let mut fids: Vec<u8> = Vec::new();
+
+        // parent FID
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        fids.extend_from_slice(&parent);
+
+        // file FID pointing to sector 265 (location=5 in partition starting at 260)
+        let name_raw: Vec<u8> = {
+            let mut n = vec![8u8];
+            n.extend_from_slice(b"badfile.txt");
+            n
+        };
+        let len_fi = name_raw.len() as u8;
+        let total_unpadded = 38 + len_fi as usize;
+        let padded = (total_unpadded + 3) & !3;
+        let mut file_fid = vec![0u8; padded];
+        w16(&mut file_fid, 0, 257);
+        file_fid[18] = 0x00;
+        file_fid[19] = len_fi;
+        w32(&mut file_fid, 20, 512);
+        w32(&mut file_fid, 24, 5); // location=5 → sector 265, which is zero
+        w16(&mut file_fid, 28, 0);
+        file_fid[38..38 + name_raw.len()].copy_from_slice(&name_raw);
+        fids.extend_from_slice(&file_fid);
+
+        // Replace root FE inline FID data
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_bad_file_entry_emits_zero_size_node() {
+        let img = make_udf_image_bad_file_entry();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("parse should succeed even with bad file entry");
+        // "badfile.txt" should appear as a zero-size node (get_file_info error fallback)
+        let node = root.find_node("/badfile.txt");
+        assert!(node.is_some(), "bad file entry should still emit a node");
+        assert_eq!(node.unwrap().size, 0);
+    }
+
+    #[test]
+    fn parse_udf_bad_file_entry_verbose() {
+        let img = make_udf_image_bad_file_entry();
+        let mut c = Cursor::new(img);
+        // verbose=true hits the "Warning: Failed to get file extent" eprintln!
+        let root = parse_udf_verbose(&mut c, true).expect("parse should succeed");
+        assert_eq!(root.name, "/");
+    }
+
+    /// Build a UDF image where the primary FSD location has tag_id=0
+    /// but the FSD is found one sector later. This exercises the "scan nearby"
+    /// branch in parse_udf_verbose (lines ~394-424).
+    fn make_udf_image_fsd_at_offset() -> Vec<u8> {
+        let mut img = vec![0u8; S * 280];
+
+        // VRS
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+
+        // AVDP at sector 256
+        let avdp = 256 * S;
+        w16(&mut img, avdp, 2);
+        w32(&mut img, avdp + 16, (3 * S) as u32);
+        w32(&mut img, avdp + 20, 257);
+
+        // PD at 257
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+
+        // LVD at 258: FSD at location=0 in partition 0
+        w16(&mut img, 258 * S, 6);
+        w32(&mut img, 258 * S + 248, S as u32);
+        w32(&mut img, 258 * S + 252, 0); // location=0 → sector 260
+        w16(&mut img, 258 * S + 256, 0);
+
+        // TD at 259
+        w16(&mut img, 259 * S, 8);
+
+        // Sector 260 (expected FSD): leave tag_id=0 (empty) → triggers scan
+        // Sector 261: the actual FSD (tag_id=256)
+        let fsd = 261 * S;
+        w16(&mut img, fsd, 256);
+        // Root ICB at LBA 262 (location=2 from partition start 260)
+        w32(&mut img, fsd + 400, S as u32);
+        w32(&mut img, fsd + 404, 2); // location=2 → sector 262
+        w16(&mut img, fsd + 408, 0);
+
+        // Root FE at sector 262: inline FID data (empty dir, just parent)
+        let rfe = 262 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3); // inline
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        w32(&mut img, rfe + 172, parent.len() as u32);
+        img[rfe + 176..rfe + 176 + parent.len()].copy_from_slice(&parent);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_fsd_found_via_nearby_scan() {
+        let img = make_udf_image_fsd_at_offset();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("FSD nearby scan should succeed");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn parse_udf_fsd_nearby_scan_verbose() {
+        let img = make_udf_image_fsd_at_offset();
+        let mut c = Cursor::new(img);
+        // verbose=true exercises "Tag X at expected FSD location, scanning nearby..." eprintln!
+        let root = parse_udf_verbose(&mut c, true).expect("FSD nearby scan should succeed");
+        assert_eq!(root.name, "/");
+    }
+
+    /// FSD nowhere to be found in the nearby scan → parse_udf returns Err.
+    fn make_udf_image_no_fsd() -> Vec<u8> {
+        let mut img = vec![0u8; S * 280];
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+        let avdp = 256 * S;
+        w16(&mut img, avdp, 2);
+        w32(&mut img, avdp + 16, (3 * S) as u32);
+        w32(&mut img, avdp + 20, 257);
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+        w16(&mut img, 258 * S, 6);
+        w32(&mut img, 258 * S + 248, S as u32);
+        w32(&mut img, 258 * S + 252, 0); // location=0 → sector 260
+        w16(&mut img, 258 * S + 256, 0);
+        w16(&mut img, 259 * S, 8);
+        // Sectors 260..292 all tag_id=0 → scan fails
+        img
+    }
+
+    #[test]
+    fn parse_udf_no_fsd_returns_err() {
+        let img = make_udf_image_no_fsd();
+        let mut c = Cursor::new(img);
+        assert!(parse_udf(&mut c).is_err());
+    }
+
+    /// Image with an extent-based file entry (ad_type=0, short ADs) rather
+    /// than inline data. Exercises the `alloc.extents.first() → Some` branch
+    /// in parse_directory, which emits a TreeNode with a file_location.
+    fn make_udf_image_extent_file() -> Vec<u8> {
+        let mut img = vec![0u8; S * 280];
+
+        // VRS
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+
+        // AVDP at sector 256
+        let avdp = 256 * S;
+        w16(&mut img, avdp, 2);
+        w32(&mut img, avdp + 16, (3 * S) as u32);
+        w32(&mut img, avdp + 20, 257);
+
+        // PD: partition 0 starts at sector 260
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+
+        // LVD: FSD at location=0 in partition 0
+        w16(&mut img, 258 * S, 6);
+        w32(&mut img, 258 * S + 248, S as u32);
+        w32(&mut img, 258 * S + 252, 0);
+        w16(&mut img, 258 * S + 256, 0);
+
+        // TD
+        w16(&mut img, 259 * S, 8);
+
+        // FSD at sector 260 (location=0 in partition)
+        let fsd = 260 * S;
+        w16(&mut img, fsd, 256);
+        // Root ICB: location=1 → sector 261
+        w32(&mut img, fsd + 400, S as u32);
+        w32(&mut img, fsd + 404, 1);
+        w16(&mut img, fsd + 408, 0);
+
+        // Root FE at sector 261: inline FID data
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3); // inline
+
+        // Build FID: parent + one file FID pointing to location=3 → sector 263
+        let mut fids: Vec<u8> = Vec::new();
+
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        fids.extend_from_slice(&parent);
+
+        let name_raw: Vec<u8> = {
+            let mut n = vec![8u8];
+            n.extend_from_slice(b"data.bin");
+            n
+        };
+        let len_fi = name_raw.len() as u8;
+        let total_unpadded = 38 + len_fi as usize;
+        let padded = (total_unpadded + 3) & !3;
+        let mut file_fid = vec![0u8; padded];
+        w16(&mut file_fid, 0, 257);
+        file_fid[18] = 0x00;
+        file_fid[19] = len_fi;
+        w32(&mut file_fid, 20, S as u32);
+        w32(&mut file_fid, 24, 3); // location=3 → sector 263
+        w16(&mut file_fid, 28, 0);
+        file_fid[38..38 + name_raw.len()].copy_from_slice(&name_raw);
+        fids.extend_from_slice(&file_fid);
+
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        // File FE at sector 263: short AD (ad_type=0) pointing to sector 264 (location=4)
+        let fe = 263 * S;
+        w16(&mut img, fe, 261); // tag_id = 261 File Entry
+        w16(&mut img, fe + 18, 0); // ICB flags: ad_type=0 (short ADs)
+                                   // EA length=0 (offset 168)
+                                   // AD length=8 (one short AD), offset 172
+                                   // Short AD at offset 176: length=512, location=4
+        let file_len: u32 = 512;
+        w32(&mut img, fe + 172, 8u32); // AD length = 8 bytes (one short AD)
+        w32(&mut img, fe + 176, file_len); // raw_length = 512 (type=0, length=512)
+        w32(&mut img, fe + 180, 4); // location = 4 → sector 264
+
+        // Sector 264: the actual file data
+        let data_sector = 264 * S;
+        img[data_sector..data_sector + 512].fill(0xAB);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_extent_based_file_has_location() {
+        let img = make_udf_image_extent_file();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("parse should succeed");
+        let node = root.find_node("/data.bin");
+        assert!(node.is_some(), "data.bin should exist");
+        let node = node.unwrap();
+        assert_eq!(node.size, 512);
+        // The file_location should be set (extent-based, not inline)
+        assert!(
+            node.file_location.is_some(),
+            "extent-based file should have file_location"
+        );
+        // Byte offset = (partition_start=260 + location=4) * 2048 = 264 * 2048
+        assert_eq!(node.file_location.unwrap(), 264 * 2048);
+    }
+
+    /// Test that `get_file_allocation` with inline data where `ad_offset >= end`
+    /// (empty inline data) returns an error (no extents, no inline_data).
+    #[test]
+    fn file_alloc_empty_inline_data_returns_err() {
+        // ad_type=3 (inline) but AD length=0 → end==ad_offset → inline_data=None
+        let buf = make_fe_buf(261, 3, &[]);
+        assert!(
+            get_file_allocation(&buf).is_err(),
+            "empty inline data should error (no extents, no inline_data)"
+        );
+    }
+
+    /// Verify `file_alloc_short_ad_sparse_skipped` also exercises the
+    /// `extent_type == 3` (next-extent-of-ADs) early break.
+    #[test]
+    fn file_alloc_short_ad_next_extent_type_breaks() {
+        let mut ad = vec![0u8; 8];
+        let raw = (3u32 << 30) | 512; // extent_type=3, length=512
+        w32(&mut ad, 0, raw);
+        w32(&mut ad, 4, 7);
+        let buf = make_fe_buf(261, 0, &ad);
+        // Type 3 means "next extent of ADs" — break immediately → no extents → Err
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    /// Same for long ADs (ad_type=1): extent_type=3 should break.
+    #[test]
+    fn file_alloc_long_ad_next_extent_type_breaks() {
+        let mut ad = vec![0u8; 16];
+        let raw = (3u32 << 30) | 512;
+        w32(&mut ad, 0, raw);
+        w32(&mut ad, 4, 7);
+        let buf = make_fe_buf(261, 1, &ad);
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    /// Long AD with extent_type=1 (sparse): skipped → no extents → Err.
+    #[test]
+    fn file_alloc_long_ad_sparse_skipped() {
+        let mut ad = vec![0u8; 16];
+        let raw = (1u32 << 30) | 512;
+        w32(&mut ad, 0, raw);
+        w32(&mut ad, 4, 7);
+        let buf = make_fe_buf(261, 1, &ad);
+        assert!(get_file_allocation(&buf).is_err());
+    }
 }
