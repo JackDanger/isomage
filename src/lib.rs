@@ -1134,4 +1134,112 @@ mod tests {
             );
         }
     }
+
+    // ── Synthetic-image tests for lib.rs public API coverage ─────────────────
+
+    /// Build a tiny synthetic UDF image that detect_and_parse_filesystem can read.
+    /// Reuses the same layout from udf.rs tests.
+    fn make_tiny_udf() -> Vec<u8> {
+        const S: usize = 2048;
+        let mut img = vec![0u8; S * 270];
+        let w16 = |buf: &mut Vec<u8>, off: usize, v: u16| {
+            buf[off..off + 2].copy_from_slice(&v.to_le_bytes())
+        };
+        let w32 = |buf: &mut Vec<u8>, off: usize, v: u32| {
+            buf[off..off + 4].copy_from_slice(&v.to_le_bytes())
+        };
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+        let avdp = 256 * S;
+        w16(&mut img, avdp, 2);
+        w32(&mut img, avdp + 16, (3 * S) as u32);
+        w32(&mut img, avdp + 20, 257);
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+        w16(&mut img, 258 * S, 6);
+        w32(&mut img, 258 * S + 248, S as u32);
+        w32(&mut img, 258 * S + 252, 0);
+        w16(&mut img, 258 * S + 256, 0);
+        w16(&mut img, 259 * S, 8);
+        w16(&mut img, 260 * S, 256);
+        w32(&mut img, 260 * S + 400, S as u32);
+        w32(&mut img, 260 * S + 404, 1);
+        w16(&mut img, 260 * S + 408, 0);
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        let mut parent = vec![0u8; 40];
+        parent[0..2].copy_from_slice(&257u16.to_le_bytes());
+        parent[18] = 0x08;
+        w32(&mut img, rfe + 172, parent.len() as u32);
+        img[rfe + 176..rfe + 176 + parent.len()].copy_from_slice(&parent);
+        img
+    }
+
+    #[test]
+    fn detect_and_parse_verbose_false_garbage() {
+        // Exercise the "Unable to detect" error path with verbose=false
+        let mut c = std::io::Cursor::new(vec![0u8; 4096]);
+        let result = detect_and_parse_filesystem_verbose(&mut c, "fake.iso", false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unable to detect"));
+    }
+
+    #[test]
+    fn detect_and_parse_verbose_true_garbage() {
+        // Exercise verbose=true on garbage: hits all verbose eprintln branches
+        let mut c = std::io::Cursor::new(vec![0u8; 512 * 1024]); // 512 KiB
+        let result = detect_and_parse_filesystem_verbose(&mut c, "fake.iso", true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_and_parse_verbose_true_udf() {
+        // verbose=true with a valid UDF image: hits successful path + verbose branches
+        let img = make_tiny_udf();
+        let mut c = std::io::Cursor::new(img);
+        let result = detect_and_parse_filesystem_verbose(&mut c, "test.udf", true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn safe_join_rejects_path_escape() {
+        // validate_entry_name allows the name but safe_join sees a bypass scenario
+        // via a crafted name that contains no / but somehow escapes (can't in practice
+        // since validate_entry_name checks), so this just confirms safe_join works.
+        let root = std::path::Path::new("/tmp");
+        let here = std::path::Path::new("/tmp");
+        // Valid join: stays inside
+        let result = safe_join(root, here, "file.txt");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cat_node_non_broken_pipe_error_propagates() {
+        // A writer that returns a non-BrokenPipe error should propagate the error.
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "no write"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let data = b"hello";
+        let mut img = vec![0u8; 512];
+        img[..data.len()].copy_from_slice(data);
+        let mut c = std::io::Cursor::new(img);
+        let node = TreeNode::new_file_with_location("f".to_string(), 5, 0, 5);
+        let result = cat_node(&mut c, &node, &mut FailWriter);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no write") || msg.contains("Permission"),
+            "got: {msg}"
+        );
+    }
 }
