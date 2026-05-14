@@ -10,12 +10,12 @@ exclude = ["fuzz"]
 
 [package]
 name = "isomage"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT"
 authors = ["Jack Danger <github@jackdanger.com>"]
-description = "Pure-Rust reader for ISO 9660 (Joliet, Rock Ridge) and UDF disc images. Read-only, no mount, no FUSE."
+description = "Pure-Rust reader for ISO 9660, UDF, FAT, ext2/3/4, NTFS, HFS+, SquashFS, ZIP, TAR, and more. No unsafe, no runtime deps."
 repository = "https://github.com/JackDanger/isomage"
 homepage = "https://github.com/JackDanger/isomage"
 documentation = "https://docs.rs/isomage"
