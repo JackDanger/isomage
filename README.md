@@ -93,10 +93,10 @@ Each crate owns one distinct problem domain:
 | Crate | Scope |
 |---|---|
 | **isomage** (this crate) | Disk images and filesystem formats — anything that *is* a disk image or *contains* a filesystem tree |
-| `7zippy-deflate` (sibling) | Deflate / GZip decompression |
-| `7zippy-lzma` (sibling) | LZMA / XZ decompression |
-| `7zippy-bzip2` (sibling) | BZip2 decompression |
-| `7zippy-sevenz` (sibling) | 7z archive format |
+| [`gzippy`](https://github.com/JackDanger/gzippy) | Deflate / GZip — the fastest gzip on any hardware; also provides the `deflate-gzippy` dep isomage can optionally use for compressed ZIP entries |
+| [`lazippy`](https://github.com/JackDanger/lazippy) | LZMA / XZ decompression |
+| `bzippy2` | BZip2 decompression (7zippy sub-crate) |
+| `7zippy` | 7z archive format umbrella |
 | … | Other compression algorithms, each isolated |
 
 **If the format is a disk image or wraps a filesystem — isomage.**

@@ -393,6 +393,135 @@ pub fn detect_and_parse<R: Read + Seek>(r: &mut R) -> Result<TreeNode, Error> {
     Ok(build_tree(r, entries))
 }
 
+// ── Write API (`write` feature) ───────────────────────────────────────────────
+
+#[cfg(feature = "write")]
+mod write_impl {
+    use super::{CDR_SIG, EOCD_SIG, LFH_SIG, METHOD_STORED};
+    use std::io::Write;
+
+    const fn make_crc32_table() -> [u32; 256] {
+        let poly = 0xEDB8_8320u32;
+        let mut table = [0u32; 256];
+        let mut i = 0usize;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut k = 0;
+            while k < 8 {
+                if c & 1 != 0 {
+                    c = poly ^ (c >> 1);
+                } else {
+                    c >>= 1;
+                }
+                k += 1;
+            }
+            table[i] = c;
+            i += 1;
+        }
+        table
+    }
+
+    static CRC32_TABLE: [u32; 256] = make_crc32_table();
+
+    pub fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc = CRC32_TABLE[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        !crc
+    }
+
+    struct CdRecord {
+        name: Vec<u8>,
+        crc: u32,
+        size: u32,
+        lh_offset: u32,
+    }
+
+    /// Write a stored (uncompressed, method 0) ZIP archive to `w`.
+    ///
+    /// `entries` is a slice of `(name, data)` pairs. Names may use `/` as a
+    /// path separator to create directory structure. The archive is valid for
+    /// all tools that support ZIP 2.0 (essentially every ZIP reader since 1993).
+    ///
+    /// Returns an error only on underlying I/O failure; the format itself is
+    /// always well-formed.
+    pub fn write_stored<W: Write>(w: &mut W, entries: &[(&str, &[u8])]) -> std::io::Result<()> {
+        let mut cd_records: Vec<CdRecord> = Vec::with_capacity(entries.len());
+        let mut offset: u32 = 0;
+
+        for (name, data) in entries {
+            let name_bytes = name.as_bytes();
+            let crc = crc32(data);
+            let size = data.len() as u32;
+            let lh_offset = offset;
+
+            // Local file header (30 + name_len bytes)
+            w.write_all(&LFH_SIG.to_le_bytes())?;
+            w.write_all(&20u16.to_le_bytes())?; // version needed: 2.0
+            w.write_all(&0u16.to_le_bytes())?; // general purpose flags
+            w.write_all(&METHOD_STORED.to_le_bytes())?; // compression: stored
+            w.write_all(&0u32.to_le_bytes())?; // last mod time + date
+            w.write_all(&crc.to_le_bytes())?;
+            w.write_all(&size.to_le_bytes())?; // compressed size = uncompressed size
+            w.write_all(&size.to_le_bytes())?; // uncompressed size
+            w.write_all(&(name_bytes.len() as u16).to_le_bytes())?;
+            w.write_all(&0u16.to_le_bytes())?; // extra field length
+            w.write_all(name_bytes)?;
+            w.write_all(data)?;
+
+            offset += 30 + name_bytes.len() as u32 + size;
+            cd_records.push(CdRecord {
+                name: name_bytes.to_vec(),
+                crc,
+                size,
+                lh_offset,
+            });
+        }
+
+        // Central directory
+        let cd_start = offset;
+        let mut cd_size: u32 = 0;
+
+        for rec in &cd_records {
+            w.write_all(&CDR_SIG.to_le_bytes())?;
+            w.write_all(&20u16.to_le_bytes())?; // version made by: 2.0
+            w.write_all(&20u16.to_le_bytes())?; // version needed: 2.0
+            w.write_all(&0u16.to_le_bytes())?; // flags
+            w.write_all(&METHOD_STORED.to_le_bytes())?;
+            w.write_all(&0u32.to_le_bytes())?; // mod time + date
+            w.write_all(&rec.crc.to_le_bytes())?;
+            w.write_all(&rec.size.to_le_bytes())?; // compressed size
+            w.write_all(&rec.size.to_le_bytes())?; // uncompressed size
+            w.write_all(&(rec.name.len() as u16).to_le_bytes())?;
+            w.write_all(&0u16.to_le_bytes())?; // extra field length
+            w.write_all(&0u16.to_le_bytes())?; // file comment length
+            w.write_all(&0u16.to_le_bytes())?; // disk number start
+            w.write_all(&0u16.to_le_bytes())?; // internal file attributes
+            w.write_all(&0u32.to_le_bytes())?; // external file attributes
+            w.write_all(&rec.lh_offset.to_le_bytes())?; // local header offset
+            w.write_all(&rec.name)?;
+            cd_size += 46 + rec.name.len() as u32;
+        }
+
+        // End of central directory record
+        let n = cd_records.len() as u16;
+        w.write_all(&EOCD_SIG.to_le_bytes())?;
+        w.write_all(&0u16.to_le_bytes())?; // disk number
+        w.write_all(&0u16.to_le_bytes())?; // disk where CD starts
+        w.write_all(&n.to_le_bytes())?; // entries on this disk
+        w.write_all(&n.to_le_bytes())?; // total entries
+        w.write_all(&cd_size.to_le_bytes())?; // CD size in bytes
+        w.write_all(&cd_start.to_le_bytes())?; // CD offset
+        w.write_all(&0u16.to_le_bytes())?; // comment length
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "write")]
+pub use write_impl::{crc32, write_stored};
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -75,10 +75,18 @@ tar = []
 mmap = ["dep:memmap2"]     # memmap2 + MmapImage. Adds runtime dep when enabled.
 simd = []                   # Fast CRC (currently scalar; SIMD intrinsics planned).
 
-# Codec opt-ins. Names mirror likely crate choices; no deps wired
-# until the first format that needs them lands.
-deflate-gzippy = []   # User-named "gzippy". Crate name TBD; see prompt log.
-lzma = []
+# Codec opt-ins. isomage deliberately contains no codec implementations —
+# compression belongs in sibling 7zippy crates. These feature flags exist
+# so isomage can optionally wire in a sibling crate's library API for
+# decompressing embedded content (e.g. deflate-compressed ZIP entries).
+#
+# Sibling crates in the 7zippy suite:
+#   deflate / gzip → gzippy  (https://github.com/JackDanger/gzippy)
+#   lzma / xz      → lazippy (https://github.com/JackDanger/lazippy)
+#   bzip2          → bzippy2 (7zippy sub-crate)
+#   lz4            → (planned 7zippy sub-crate)
+deflate-gzippy = []   # gates dep on gzippy for deflate decompression
+lzma = []             # gates dep on lazippy for LZMA/XZ decompression
 zstd = []
 bzip2 = []
 lz4 = []
@@ -173,8 +181,16 @@ name = "zip_round_trip"
 required-features = ["zip"]
 
 [[test]]
+name = "zip_write_round_trip"
+required-features = ["zip", "write"]
+
+[[test]]
 name = "tar_round_trip"
 required-features = ["tar"]
+
+[[test]]
+name = "tar_write_round_trip"
+required-features = ["tar", "write"]
 
 [profile.release]
 opt-level = 2

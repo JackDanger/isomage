@@ -376,6 +376,77 @@ pub fn detect_and_parse<R: Read + Seek>(r: &mut R) -> Result<TreeNode, Error> {
     Ok(build_tree(entries))
 }
 
+// ── Write API (`write` feature) ───────────────────────────────────────────────
+
+/// Write a ustar TAR archive to `w`.
+///
+/// `entries` is a slice of `(name, data)` pairs. Names may use `/` as a path
+/// separator. The output is a valid POSIX ustar archive readable by any
+/// modern `tar` implementation.
+///
+/// Requires `--features write`.
+#[cfg(feature = "write")]
+pub fn write<W: std::io::Write>(w: &mut W, entries: &[(&str, &[u8])]) -> std::io::Result<()> {
+    for (name, data) in entries {
+        write_entry(w, name, data)?;
+    }
+    // End-of-archive: two 512-byte zero blocks (POSIX.1-2001 §10.1.2).
+    w.write_all(&[0u8; 1024])?;
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+fn write_entry<W: std::io::Write>(w: &mut W, name: &str, data: &[u8]) -> std::io::Result<()> {
+    let mut header = [0u8; 512];
+
+    // Name field (offset 0, 100 bytes). Truncate silently; callers responsible
+    // for keeping names under 100 bytes or using a GNU long-name pre-header.
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len().min(100);
+    header[..name_len].copy_from_slice(&name_bytes[..name_len]);
+
+    // Mode: 0000644 (owner rw, group/other r)
+    header[100..107].copy_from_slice(b"0000644");
+
+    // UID + GID: 0000000
+    header[108..115].copy_from_slice(b"0000000");
+    header[116..123].copy_from_slice(b"0000000");
+
+    // Size (octal, 11 digits + NUL)
+    let size_str = format!("{:011o}\0", data.len());
+    header[124..136].copy_from_slice(size_str.as_bytes());
+
+    // Modification time: zero epoch
+    header[136..147].copy_from_slice(b"00000000000");
+    header[147] = 0;
+
+    // Type flag: regular file
+    header[156] = b'0';
+
+    // ustar magic + version
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+
+    // Checksum: fill the checksum field with spaces, sum all 512 bytes,
+    // write the octal sum back. The trailing space matches GNU tar convention.
+    header[148..156].fill(b' ');
+    let cksum: u32 = header.iter().map(|&b| b as u32).sum();
+    let cksum_str = format!("{:06o}\0 ", cksum);
+    header[148..156].copy_from_slice(cksum_str.as_bytes());
+
+    w.write_all(&header)?;
+    w.write_all(data)?;
+
+    // Pad data to 512-byte block boundary.
+    let remainder = data.len() % 512;
+    if remainder != 0 {
+        let padding = 512 - remainder;
+        w.write_all(&vec![0u8; padding])?;
+    }
+
+    Ok(())
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

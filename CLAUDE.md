@@ -15,9 +15,14 @@ a filesystem tree.
 **NOT in isomage — compression algorithms:**
 GZip, BZip2, XZ, LZMA, Deflate, 7z, and every other format whose
 primary purpose is compression rather than filesystem containment.
-These belong in their own sibling crates within the 7zippy suite
-(`7zippy-deflate`, `7zippy-lzma`, `7zippy-bzip2`, `7zippy-sevenz`,
-etc.).
+These belong in sibling crates in the 7zippy suite:
+- `gzippy` (https://github.com/JackDanger/gzippy) — GZip / Deflate
+- `lazippy` (https://github.com/JackDanger/lazippy) — LZMA / XZ
+- `bzippy2` — BZip2 (7zippy sub-crate)
+- `7zippy` (https://github.com/JackDanger/7zippy) — 7z archive umbrella
+
+When in doubt about the broader 7zippy architecture, read `~/www/7zippy/README.md`
+and `~/www/7zippy/docs/ARCHITECTURE.md`.
 
 The rule in one sentence: **if it's a disk image, isomage handles it;
 if it's a compression algorithm, it goes in a sibling 7zippy crate.**

@@ -126,6 +126,8 @@ fn which(cmd: &str) -> Option<PathBuf> {
     None
 }
 
+/// All image/archive files under test_data/ that isomage can read, grouped by
+/// format extension. Each entry is `(extension, path)`.
 fn corpus() -> Vec<PathBuf> {
     let dir = Path::new("test_data");
     let mut out = Vec::new();
@@ -133,7 +135,7 @@ fn corpus() -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let p = entry.path();
             match p.extension().and_then(OsStr::to_str) {
-                Some("iso") | Some("img") | Some("udf") => out.push(p),
+                Some("iso") | Some("img") | Some("udf") | Some("zip") | Some("tar") => out.push(p),
                 _ => {}
             }
         }
@@ -142,12 +144,34 @@ fn corpus() -> Vec<PathBuf> {
     out
 }
 
+/// Extract all files from a ZIP archive to a sink, returning total bytes.
+#[cfg(feature = "zip")]
+fn extract_zip_to_sink(image_path: &Path) -> io::Result<u64> {
+    use isomage::formats::zip;
+    let mut file = File::open(image_path)?;
+    let root = zip::detect_and_parse(&mut file).map_err(|e| io::Error::other(e.to_string()))?;
+    let mut total = 0u64;
+    walk(&root, &mut file, &mut total)?;
+    Ok(total)
+}
+
+/// Extract all files from a TAR archive to a sink, returning total bytes.
+#[cfg(feature = "tar")]
+fn extract_tar_to_sink(image_path: &Path) -> io::Result<u64> {
+    use isomage::formats::tar;
+    let mut file = File::open(image_path)?;
+    let root = tar::detect_and_parse(&mut file).map_err(|e| io::Error::other(e.to_string()))?;
+    let mut total = 0u64;
+    walk(&root, &mut file, &mut total)?;
+    Ok(total)
+}
+
 fn bench_seqread(c: &mut Criterion) {
     let images = corpus();
     if images.is_empty() {
         eprintln!(
-            "warning: no images in test_data/. Run `make test-data` or drop \
-             larger .iso/.img files into test_data/ for meaningful numbers."
+            "warning: no images in test_data/. Run `make test-data` or add \
+             .iso/.img/.zip/.tar files to test_data/ for meaningful numbers."
         );
         return;
     }
@@ -155,7 +179,7 @@ fn bench_seqread(c: &mut Criterion) {
     let have_7z = which("7zz").or_else(|| which("7z")).is_some();
     if !have_7z {
         eprintln!(
-            "warning: 7zz/7z not on PATH; baseline group skipped. Install \
+            "warning: 7zz/7z not on PATH; 7z baseline group skipped. Install \
              p7zip to get a comparable number."
         );
     }
@@ -168,16 +192,42 @@ fn bench_seqread(c: &mut Criterion) {
             .and_then(OsStr::to_str)
             .unwrap_or("unknown")
             .to_string();
+        let ext = img.extension().and_then(OsStr::to_str).unwrap_or("");
 
         group.throughput(Throughput::Bytes(size));
 
-        group.bench_with_input(BenchmarkId::new("isomage", &name), img, |b, path| {
-            b.iter(|| {
-                let n = extract_all_to_sink(path).expect("isomage extract");
-                black_box(n);
-            });
-        });
+        // isomage extraction
+        match ext {
+            "iso" | "img" | "udf" => {
+                group.bench_with_input(BenchmarkId::new("isomage", &name), img, |b, path| {
+                    b.iter(|| {
+                        let n = extract_all_to_sink(path).expect("isomage extract");
+                        black_box(n);
+                    });
+                });
+            }
+            #[cfg(feature = "zip")]
+            "zip" => {
+                group.bench_with_input(BenchmarkId::new("isomage", &name), img, |b, path| {
+                    b.iter(|| {
+                        let n = extract_zip_to_sink(path).expect("isomage zip extract");
+                        black_box(n);
+                    });
+                });
+            }
+            #[cfg(feature = "tar")]
+            "tar" => {
+                group.bench_with_input(BenchmarkId::new("isomage", &name), img, |b, path| {
+                    b.iter(|| {
+                        let n = extract_tar_to_sink(path).expect("isomage tar extract");
+                        black_box(n);
+                    });
+                });
+            }
+            _ => {}
+        }
 
+        // 7z baseline (handles all formats)
         if have_7z {
             group.bench_with_input(BenchmarkId::new("7zz", &name), img, |b, path| {
                 b.iter(|| {
