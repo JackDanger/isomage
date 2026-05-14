@@ -1298,4 +1298,35 @@ mod tests {
         let child = &tree.children[0];
         assert_eq!(child.size, 0);
     }
+
+    // ── seek_to_metadata_block: uncompressed-block skip covers lines 285-287 ──
+
+    #[test]
+    fn seek_to_metadata_block_uncompressed_skip() {
+        // block_idx=1 → skip one block before reading.
+        // First block header: uncompressed (bit 15 set), size=4 → skip 4 bytes.
+        // Then the second block header + content = the actual target block.
+        let mut data: Vec<u8> = Vec::new();
+        // First (skip) block: header = size=4 | 0x8000 = 0x8004.
+        data.extend_from_slice(&0x8004u16.to_le_bytes()); // uncompressed, size=4
+        data.extend_from_slice(&[0xAAu8; 4]); // 4 bytes of skipped content
+        // Target block: uncompressed, size=8, content = 8 zeros.
+        data.extend_from_slice(&0x8008u16.to_le_bytes()); // uncompressed, size=8
+        data.extend_from_slice(&[0xBBu8; 8]);
+        let mut c = Cursor::new(&data);
+        // seek_to_metadata_block(r, table_start=0, block_idx=1) should skip the
+        // first block and return the content of the second block.
+        let result = seek_to_metadata_block(&mut c, 0, 1).unwrap();
+        assert_eq!(result, vec![0xBBu8; 8]);
+    }
+
+    // ── parse_inode_body: too_short path covers lines 313-317 ────────────────
+
+    #[test]
+    fn parse_inode_body_dir_too_short_returns_error() {
+        // INODE_DIR requires 16 bytes; provide only 10 → too_short(16) fires (lines 314-317).
+        let body = vec![0u8; 10];
+        let result = parse_inode_body(&body, INODE_DIR, 4096);
+        assert!(matches!(result, Err(Error::Io(_))));
+    }
 }
