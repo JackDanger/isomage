@@ -2163,4 +2163,16 @@ mod tests {
         assert!(root.is_directory);
         assert!(root.children.is_empty());
     }
+
+    #[test]
+    fn parse_udf_metadata_partition_verbose() {
+        // verbose=true exercises all eprintln! blocks in the metadata partition path
+        // (lines 295-298, 330, 340, 349, 360-363, etc.).
+        let img = make_udf_metadata_partition_image();
+        let mut c = Cursor::new(img);
+        let root = parse_udf_verbose(&mut c, true)
+            .expect("verbose parse failed on metadata-partition image");
+        assert_eq!(root.name, "/");
+        assert!(root.is_directory);
+    }
 }
