@@ -882,4 +882,61 @@ mod tests {
             Err(Error::BadBootSector)
         ));
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("short") || msg.contains("FAT"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_boot_sector() {
+        let msg = format!("{}", Error::BadBootSector);
+        assert!(
+            msg.contains("BPB") || msg.contains("boot") || msg.contains("FAT"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(std::io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadBootSector.source().is_none());
+    }
+
+    // ── is_eoc / is_bad_cluster for FAT16 and FAT32 ───────────────────────────
+
+    #[test]
+    fn is_eoc_fat16_and_fat32() {
+        assert!(is_eoc(FatType::Fat16, 0xFFF8));
+        assert!(is_eoc(FatType::Fat16, 0xFFFF));
+        assert!(!is_eoc(FatType::Fat16, 0xFFF7));
+        assert!(is_eoc(FatType::Fat32, 0x0FFF_FFF8));
+        assert!(is_eoc(FatType::Fat32, 0x0FFF_FFFF));
+        assert!(!is_eoc(FatType::Fat32, 0x0FFF_FFF7));
+    }
+
+    #[test]
+    fn is_bad_cluster_fat16_and_fat32() {
+        assert!(is_bad_cluster(FatType::Fat16, 0xFFF7));
+        assert!(!is_bad_cluster(FatType::Fat16, 0xFFF8));
+        assert!(is_bad_cluster(FatType::Fat32, 0x0FFF_FFF7));
+        assert!(!is_bad_cluster(FatType::Fat32, 0x0FFF_FFF8));
+    }
 }
