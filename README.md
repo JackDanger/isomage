@@ -7,8 +7,14 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.74-blue)](Cargo.toml)
 [![Zero deps](https://img.shields.io/badge/dependencies-0-success)](Cargo.toml)
 
-> **A pure-Rust reader for ISO 9660 and UDF disc images. Zero
-> dependencies. Read-only. No mount, no FUSE, no `unsafe`.**
+> **A pure-Rust reader and writer for disk images and filesystem
+> formats. Zero default dependencies. No mount, no FUSE, no `unsafe`.**
+>
+> `isomage` is one crate in the [7zippy](https://github.com/JackDanger/7zippy)
+> suite. It owns every format that *is a disk image or contains a filesystem* —
+> ISO, UDF, FAT, NTFS, ext, SquashFS, HFS+, APFS, WIM, DMG, VHD, VMDK,
+> QCOW2, MBR, GPT, ZIP, TAR, and more. Compression algorithms (GZip, BZip2,
+> XZ, LZMA, Deflate, 7z) live in their own sibling crates within 7zippy.
 
 ```toml
 [dependencies]
@@ -44,40 +50,61 @@ extract_node(&mut iso, hostname, "/tmp/extracted")?;
 
 ## What it parses
 
-- **ISO 9660** (ECMA-119), including the **Joliet** Unicode-filenames
-  extension and the **Rock Ridge** POSIX long-filenames extension.
-- **UDF** (ECMA-167), including metadata partitions and multi-extent
-  files — enough for typical CDs, DVDs, and Blu-rays.
+**isomage handles disk images and filesystems. Compression algorithms
+are out of scope — see the other 7zippy sibling crates for those.**
 
-Detection is automatic: `detect_and_parse_filesystem` tries ISO 9660,
-then UDF, returning whichever matches and a tagged-error string
-listing both attempts if neither does.
+### Filesystem / partition formats
+
+- **ISO 9660** (ECMA-119) — Joliet + Rock Ridge extensions.
+- **UDF** (ECMA-167) — metadata partitions, multi-extent files; covers CDs, DVDs, Blu-rays.
+- **FAT12 / FAT16 / FAT32** — `--features fat`.
+- **ext2 / ext3 / ext4** — extent trees + classical block pointers — `--features ext`.
+- **SquashFS** — read-only compressed filesystem — `--features squashfs`.
+- **NTFS** — Windows NT filesystem — `--features ntfs`.
+- **HFS+** — macOS HFS Plus — `--features hfsplus`.
+- **APFS** — Apple File System — `--features apfs`.
+- **MBR / GPT** — partition table readers — `--features mbr` / `--features gpt`.
+
+### Virtual disk containers
+
+- **VHD** (Virtual Hard Disk) — `--features vhd`.
+- **VMDK** (VMware Virtual Machine Disk) — `--features vmdk`.
+- **QCOW2** (QEMU Copy On Write) — `--features qcow2`.
+- **WIM** (Windows Imaging Format) — `--features wim`.
+- **DMG** (Apple Disk Image) — `--features dmg`.
+
+### Archive formats with filesystem-like trees
+
+- **ZIP** (PKZIP / ZIP64, stored entries readable via `cat_node`) — `--features zip`.
+- **TAR** (ustar / GNU / PAX) — `--features tar`.
+
+Detection is automatic: `detect_and_parse_filesystem` tries all enabled
+formats and returns the first match with a tagged-error string if none
+match.
 
 ---
 
-## Why a new crate
+## Where isomage fits in 7zippy
 
-`7z` and friends already extract from ISO and UDF. `isomage` is for a
-narrower audience:
+[7zippy](https://github.com/JackDanger/7zippy) is a suite of pure-Rust
+crates that together cover the full format matrix that 7-Zip handles.
+Each crate owns one distinct problem domain:
 
-- **A Rust program that wants to inspect an ISO without shelling out**
-  or pulling in a C/C++ FFI dep. There was no pure-Rust crate doing
-  ISO 9660 + UDF together when this was written.
-- **Embedding into bigger systems**: indexers, server-side preview
-  generators, build tooling that needs to read installer ISOs in
-  CI without spawning child processes.
-- **Investigating malformed discs.** Every parser entry point has a
-  `_verbose` variant that prints spec-section-tagged diagnostics
-  (volume descriptors at sector 16, AVDP at 256, partition maps,
-  etc.) to stderr — useful for figuring out *why* a particular disc
-  won't read.
-- **Auditable code.** ~1.7k lines of safe Rust, zero `unsafe`, zero
-  runtime dependencies. You can read the whole parser in an
-  afternoon.
+| Crate | Scope |
+|---|---|
+| **isomage** (this crate) | Disk images and filesystem formats — anything that *is* a disk image or *contains* a filesystem tree |
+| `7zippy-deflate` (sibling) | Deflate / GZip decompression |
+| `7zippy-lzma` (sibling) | LZMA / XZ decompression |
+| `7zippy-bzip2` (sibling) | BZip2 decompression |
+| `7zippy-sevenz` (sibling) | 7z archive format |
+| … | Other compression algorithms, each isolated |
 
-If you just want to extract a movie disc on the command line, `7z x
-movie.iso` is faster than getting Rust set up. This crate isn't
-trying to replace that.
+**If the format is a disk image or wraps a filesystem — isomage.**
+**If the format is a compression algorithm — a sibling 7zippy crate.**
+
+This boundary is deliberate: isomage stays zero-dependency (no codec
+crates in default features), and each codec crate can be audited,
+fuzz-tested, and versioned independently.
 
 ---
 
