@@ -17,9 +17,14 @@
 
 mod common;
 
-use std::io::{Cursor, Seek, SeekFrom};
+use std::io::Cursor;
 
+#[cfg(target_os = "macos")]
+use std::io::{Seek, SeekFrom};
+
+#[cfg(target_os = "macos")]
 use common::tools;
+#[cfg(target_os = "macos")]
 use common::RoundTrip;
 
 use isomage::formats::dmg;

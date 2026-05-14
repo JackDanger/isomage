@@ -882,4 +882,505 @@ mod tests {
             Err(Error::BadBootSector)
         ));
     }
+
+    // ── BPB validation edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn read_bpb_num_fats_zero_returns_bad_boot_sector() {
+        let mut img = make_fat12_image();
+        img[16] = 0;
+        let mut cursor = Cursor::new(&img);
+        assert!(matches!(read_bpb(&mut cursor), Err(Error::BadBootSector)));
+    }
+
+    #[test]
+    fn read_bpb_num_fats_three_returns_bad_boot_sector() {
+        let mut img = make_fat12_image();
+        img[16] = 3;
+        let mut cursor = Cursor::new(&img);
+        assert!(matches!(read_bpb(&mut cursor), Err(Error::BadBootSector)));
+    }
+
+    #[test]
+    fn read_bpb_fat_size_zero_returns_bad_boot_sector() {
+        let mut img = make_fat12_image();
+        img[22..24].copy_from_slice(&0u16.to_le_bytes()); // fat_size_16 = 0
+                                                          // fat_size_32 stays 0 → fat_size = 0 → BadBootSector
+        let mut cursor = Cursor::new(&img);
+        assert!(matches!(read_bpb(&mut cursor), Err(Error::BadBootSector)));
+    }
+
+    #[test]
+    fn read_bpb_total_sectors_zero_returns_bad_boot_sector() {
+        let mut img = make_fat12_image();
+        img[19..21].copy_from_slice(&0u16.to_le_bytes()); // total_sectors_16 = 0
+                                                          // total_sectors_32 stays 0 → total_sectors = 0 → BadBootSector
+        let mut cursor = Cursor::new(&img);
+        assert!(matches!(read_bpb(&mut cursor), Err(Error::BadBootSector)));
+    }
+
+    #[test]
+    fn fat16_detected_by_cluster_count() {
+        // total_clusters = 10000, in [4085, 65525) → FAT16 by cluster count.
+        // root_entry_count ≠ 0 so FAT32-by-signature path is not taken.
+        // data_sectors = total_sectors(10004) - reserved(1) - fats(2) - root(1) = 10000
+        let mut img = vec![0u8; 512];
+        img[11..13].copy_from_slice(&512u16.to_le_bytes()); // bytes_per_sector
+        img[13] = 1; // sectors_per_cluster
+        img[14..16].copy_from_slice(&1u16.to_le_bytes()); // reserved_sectors
+        img[16] = 2; // num_fats
+        img[17..19].copy_from_slice(&16u16.to_le_bytes()); // root_entry_count (non-zero)
+        img[19..21].copy_from_slice(&10004u16.to_le_bytes()); // total_sectors_16
+        img[22..24].copy_from_slice(&1u16.to_le_bytes()); // fat_size_16
+        img[510] = 0x55;
+        img[511] = 0xAA;
+        let mut cursor = Cursor::new(&img);
+        let ctx = read_bpb(&mut cursor).unwrap();
+        assert_eq!(ctx.fat_type, FatType::Fat16);
+    }
+
+    #[test]
+    fn fat32_bad_root_cluster_returns_bad_boot_sector() {
+        // FAT32 detected by cluster count (total_clusters ≥ 65525),
+        // root_cluster_32 = 0 (< 2) → BadBootSector.
+        // data_sectors = total(70000) - reserved(1) - fats(2*1=2) - root(1) = 69996
+        let mut img = vec![0u8; 512];
+        img[11..13].copy_from_slice(&512u16.to_le_bytes());
+        img[13] = 1;
+        img[14..16].copy_from_slice(&1u16.to_le_bytes()); // reserved_sectors = 1
+        img[16] = 2;
+        img[17..19].copy_from_slice(&16u16.to_le_bytes()); // root_entry_count ≠ 0
+        img[19..21].copy_from_slice(&0u16.to_le_bytes()); // total_sectors_16 = 0
+        img[22..24].copy_from_slice(&1u16.to_le_bytes()); // fat_size_16 = 1
+        img[32..36].copy_from_slice(&70000u32.to_le_bytes()); // total_sectors_32
+        img[44..48].copy_from_slice(&0u32.to_le_bytes()); // root_cluster = 0 → bad
+        img[510] = 0x55;
+        img[511] = 0xAA;
+        let mut cursor = Cursor::new(&img);
+        assert!(matches!(read_bpb(&mut cursor), Err(Error::BadBootSector)));
+    }
+
+    // ── short_name_83 edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn short_name_83_e5_prefix() {
+        let mut entry = [b' '; 11];
+        entry[0] = 0x05; // must be replaced with 0xE5
+        let name = short_name_83(&entry);
+        assert!(
+            !name.starts_with('\x05'),
+            "0x05 must be remapped, got: {name}"
+        );
+    }
+
+    #[test]
+    fn short_name_83_no_extension() {
+        let mut entry = [b' '; 11];
+        entry[..6].copy_from_slice(b"README");
+        // extension bytes stay as spaces → no dot appended
+        let name = short_name_83(&entry);
+        assert_eq!(name, "README");
+    }
+
+    // ── parse_dir_entries: volume label skipped ───────────────────────────────
+
+    #[test]
+    fn parse_dir_entries_volume_id_skipped() {
+        let mut entry = [0u8; 32];
+        entry[0] = b'M'; // non-zero, non-deleted
+        entry[11] = 0x08; // ATTR_VOLUME_ID only (no ATTR_DIRECTORY)
+        let mut dir = entry.to_vec();
+        dir.extend_from_slice(&[0u8; 32]); // end-of-directory
+        let entries = parse_dir_entries(&dir);
+        assert!(entries.is_empty(), "volume label must be skipped");
+    }
+
+    // ── fat_entry for all three FAT types ────────────────────────────────────
+
+    #[test]
+    fn fat12_fat_entry_odd_cluster() {
+        // FAT12 cluster 3 (odd): byte_off = 3 + 3/2 = 4, word = img[4..6]
+        // odd → result = word >> 4. Write word = 0x0070 → result = 7.
+        let mut fat = vec![0u8; 512];
+        fat[4] = 0x70;
+        fat[5] = 0x00;
+        let ctx = Context {
+            base_offset: 0,
+            fat_type: FatType::Fat12,
+            bytes_per_cluster: 512,
+            fat_start_rel: 0,
+            root_dir_rel: 512,
+            root_dir_size_bytes: 512,
+            data_start_rel: 1024,
+            root_cluster: 0,
+            total_clusters: 10,
+        };
+        let mut cursor = Cursor::new(fat);
+        let entry = ctx.fat_entry(&mut cursor, 3).unwrap();
+        assert_eq!(entry, 7);
+    }
+
+    #[test]
+    fn fat16_fat_entry() {
+        // FAT16 cluster 5: seek to fat_abs + 5*2 = 10, read 2 bytes.
+        let mut fat = vec![0u8; 512];
+        fat[10] = 0x07;
+        fat[11] = 0x00;
+        let ctx = Context {
+            base_offset: 0,
+            fat_type: FatType::Fat16,
+            bytes_per_cluster: 512,
+            fat_start_rel: 0,
+            root_dir_rel: 512,
+            root_dir_size_bytes: 512,
+            data_start_rel: 1024,
+            root_cluster: 0,
+            total_clusters: 100,
+        };
+        let mut cursor = Cursor::new(fat);
+        let entry = ctx.fat_entry(&mut cursor, 5).unwrap();
+        assert_eq!(entry, 7);
+    }
+
+    #[test]
+    fn fat32_fat_entry_masks_reserved_bits() {
+        // FAT32 cluster 2: seek to fat_abs + 2*4 = 8, read 4 bytes.
+        // 0xFFFFFFFF & 0x0FFFFFFF = 0x0FFFFFFF (top 4 bits masked).
+        let mut fat = vec![0u8; 512];
+        fat[8] = 0xFF;
+        fat[9] = 0xFF;
+        fat[10] = 0xFF;
+        fat[11] = 0xFF;
+        let ctx = Context {
+            base_offset: 0,
+            fat_type: FatType::Fat32,
+            bytes_per_cluster: 512,
+            fat_start_rel: 0,
+            root_dir_rel: 512,
+            root_dir_size_bytes: 512,
+            data_start_rel: 1024,
+            root_cluster: 2,
+            total_clusters: 100,
+        };
+        let mut cursor = Cursor::new(fat);
+        let entry = ctx.fat_entry(&mut cursor, 2).unwrap();
+        assert_eq!(entry, 0x0FFF_FFFF);
+    }
+
+    // ── cluster_chain: EOC and cycle detection ────────────────────────────────
+
+    #[test]
+    fn cluster_chain_stops_at_eoc() {
+        // FAT12: cluster 2 (even) → EOC.
+        // byte_off for cluster 2 = 2+1=3; word at [3..5].
+        // even → word & 0x0FFF. Write 0xFF, 0x0F → word=0x0FFF → EOC.
+        let mut fat = vec![0u8; 512];
+        fat[3] = 0xFF;
+        fat[4] = 0x0F;
+        let ctx = Context {
+            base_offset: 0,
+            fat_type: FatType::Fat12,
+            bytes_per_cluster: 512,
+            fat_start_rel: 0,
+            root_dir_rel: 512,
+            root_dir_size_bytes: 512,
+            data_start_rel: 1024,
+            root_cluster: 0,
+            total_clusters: 10,
+        };
+        let mut cursor = Cursor::new(fat);
+        let chain = ctx.cluster_chain(&mut cursor, 2).unwrap();
+        assert_eq!(chain, vec![2u32]);
+    }
+
+    #[test]
+    fn cluster_chain_cycle_detection() {
+        // FAT16: cluster 2 → 3 → 2 → … (cycle).
+        // total_clusters=2 → cycle triggers after pushing 3 entries.
+        let mut fat = vec![0u8; 512];
+        fat[4] = 3; // cluster 2 → 3
+        fat[6] = 2; // cluster 3 → 2
+        let ctx = Context {
+            base_offset: 0,
+            fat_type: FatType::Fat16,
+            bytes_per_cluster: 512,
+            fat_start_rel: 0,
+            root_dir_rel: 512,
+            root_dir_size_bytes: 512,
+            data_start_rel: 1024,
+            root_cluster: 0,
+            total_clusters: 2,
+        };
+        let mut cursor = Cursor::new(fat);
+        let chain = ctx.cluster_chain(&mut cursor, 2).unwrap();
+        // chain.len() > total_clusters(2) triggers break after 3 pushes.
+        assert_eq!(chain.len(), 3);
+    }
+
+    #[test]
+    fn cluster_chain_stops_at_eoc_in_range() {
+        // FAT12 with a large total_clusters so the EOC value (0x0FF8) falls within
+        // the valid cluster range, covering the is_eoc break at line 170.
+        // cluster 2 (even): byte_off=3, word=[3..5] & 0x0FFF = 0x0FF8 (EOC).
+        let mut fat = vec![0u8; 512];
+        fat[3] = 0xF8;
+        fat[4] = 0x0F; // word = 0x0FF8 → EOC
+        let ctx = Context {
+            base_offset: 0,
+            fat_type: FatType::Fat12,
+            bytes_per_cluster: 512,
+            fat_start_rel: 0,
+            root_dir_rel: 512,
+            root_dir_size_bytes: 512,
+            data_start_rel: 1024,
+            root_cluster: 0,
+            total_clusters: 0x1000, // max_valid = 0x1001 > 0x0FF8 so in-range
+        };
+        let mut cursor = Cursor::new(fat);
+        let chain = ctx.cluster_chain(&mut cursor, 2).unwrap();
+        // cluster 2 pushed, then fat_entry(2) = 0x0FF8 = EOC → is_eoc break
+        assert_eq!(chain, vec![2u32]);
+    }
+
+    // ── dot/dotdot entries skipped ────────────────────────────────────────────
+
+    #[test]
+    fn parse_dir_entries_dot_entries_skipped() {
+        let mut buf = vec![0u8; 32 * 3];
+        // Entry 0: "."
+        buf[0] = b'.';
+        buf[1..8].fill(b' ');
+        buf[8..11].fill(b' ');
+        buf[11] = 0x10; // ATTR_DIRECTORY
+                        // Entry 1: ".."
+        buf[32] = b'.';
+        buf[33] = b'.';
+        buf[34..40].fill(b' ');
+        buf[40..43].fill(b' ');
+        buf[43] = 0x10;
+        // Entry 2: end-of-directory (all zeros)
+        let entries = parse_dir_entries(&buf);
+        assert!(entries.is_empty(), "dot and dotdot entries must be skipped");
+    }
+
+    // ── subdirectory with start_cluster ≥ 2 (recursive build_tree) ───────────
+
+    #[test]
+    fn subdirectory_with_children_recurses() {
+        // FAT12 image with a subdirectory at cluster 2 containing a file at cluster 3.
+        // Sectors: 0=BPB, 1=FAT1, 2=FAT2, 3=root-dir, 4=cluster2(subdir), 5=cluster3(file-data).
+        // data_start = (1 + 2*1)*512 + 16*32 = 1536 + 512 = 2048
+        // cluster 2 → offset 2048, cluster 3 → offset 2560.
+        let mut img = vec![0u8; 512 * 6];
+
+        // BPB
+        img[11..13].copy_from_slice(&512u16.to_le_bytes());
+        img[13] = 1; // sectors_per_cluster
+        img[14..16].copy_from_slice(&1u16.to_le_bytes()); // reserved = 1
+        img[16] = 2; // num_fats
+        img[17..19].copy_from_slice(&16u16.to_le_bytes()); // root_entry_count
+        img[19..21].copy_from_slice(&6u16.to_le_bytes()); // total_sectors_16
+        img[22..24].copy_from_slice(&1u16.to_le_bytes()); // fat_size_16
+        img[510] = 0x55;
+        img[511] = 0xAA;
+
+        // FAT at sector 1: clusters 0+1 reserved, cluster 2=EOC, cluster 3=EOC.
+        // Encoding: [0xF8,0xFF,0xFF, 0xFF,0xFF,0xFF] covers entries 0-3.
+        let f = 512usize;
+        img[f] = 0xF8;
+        img[f + 1] = 0xFF;
+        img[f + 2] = 0xFF;
+        img[f + 3] = 0xFF; // cluster 2 low → EOC
+        img[f + 4] = 0xFF; // cluster 2 hi (F) + cluster 3 lo (F) → both EOC
+        img[f + 5] = 0xFF; // cluster 3 hi
+                           // FAT copy 2 at sector 2
+        let fat_copy = img[512..518].to_vec();
+        img[1024..1024 + 6].copy_from_slice(&fat_copy);
+
+        // Root dir at sector 3 (offset 1536): one ATTR_DIRECTORY entry → cluster 2.
+        let rd = 1536usize;
+        img[rd..rd + 8].copy_from_slice(b"SUBDIR  ");
+        img[rd + 8..rd + 11].copy_from_slice(b"   ");
+        img[rd + 11] = 0x10; // ATTR_DIRECTORY
+        img[rd + 26..rd + 28].copy_from_slice(&2u16.to_le_bytes()); // start_cluster = 2
+
+        // Subdir at cluster 2 (offset 2048): one file entry → cluster 3.
+        let sd = 2048usize;
+        img[sd..sd + 8].copy_from_slice(b"CHILD   ");
+        img[sd + 8..sd + 11].copy_from_slice(b"TXT");
+        img[sd + 11] = 0x20; // ATTR_ARCHIVE
+        img[sd + 26..sd + 28].copy_from_slice(&3u16.to_le_bytes()); // start_cluster = 3
+        img[sd + 28..sd + 32].copy_from_slice(&5u32.to_le_bytes()); // file_size = 5
+
+        // File data at cluster 3 (offset 2560)
+        img[2560..2565].copy_from_slice(b"hello");
+
+        let mut cursor = Cursor::new(&img);
+        let tree = detect_and_parse(&mut cursor).unwrap();
+        assert_eq!(tree.children.len(), 1);
+        let dir = &tree.children[0];
+        assert!(dir.is_directory);
+        assert_eq!(dir.name, "SUBDIR");
+        assert_eq!(dir.children.len(), 1);
+        let child = &dir.children[0];
+        assert_eq!(child.name, "CHILD.TXT");
+        assert_eq!(child.size, 5);
+    }
+
+    // ── build_tree depth limit ────────────────────────────────────────────────
+
+    #[test]
+    fn build_tree_depth_limit_returns_empty() {
+        let img = make_fat12_image();
+        let mut cursor = Cursor::new(&img);
+        let ctx = read_bpb(&mut cursor).unwrap();
+        let result = build_tree(&ctx, &mut cursor, 0, 33).unwrap();
+        assert!(result.is_empty(), "depth > 32 must return empty vec");
+    }
+
+    // ── directory entry node construction ─────────────────────────────────────
+
+    #[test]
+    fn directory_entry_builds_dir_node() {
+        // Root dir has one ATTR_DIRECTORY entry with start_cluster=0.
+        let mut img = make_fat12_image();
+        let rd = 512 * 3;
+        img[rd..rd + 8].copy_from_slice(b"SUBDIR  ");
+        img[rd + 8..rd + 11].copy_from_slice(b"   ");
+        img[rd + 11] = 0x10; // ATTR_DIRECTORY
+        img[rd + 26..rd + 28].copy_from_slice(&0u16.to_le_bytes()); // start_cluster = 0
+        img[rd + 28..rd + 32].copy_from_slice(&0u32.to_le_bytes()); // file_size = 0
+        let mut cursor = Cursor::new(&img);
+        let tree = detect_and_parse(&mut cursor).unwrap();
+        assert_eq!(tree.children.len(), 1);
+        let dir = &tree.children[0];
+        assert!(dir.is_directory);
+        assert_eq!(dir.name, "SUBDIR");
+        assert_eq!(dir.children.len(), 0);
+    }
+
+    // ── truncated chain / zero-size file (no location) ────────────────────────
+
+    #[test]
+    fn truncated_chain_file_has_no_location() {
+        // file_size=1000 requires 2 clusters but chain=[2] (only 1) → fragmented path.
+        let mut img = make_fat12_image();
+        let rd = 512 * 3;
+        img[rd + 28..rd + 32].copy_from_slice(&1000u32.to_le_bytes());
+        let mut cursor = Cursor::new(&img);
+        let tree = detect_and_parse(&mut cursor).unwrap();
+        let file = &tree.children[0];
+        assert!(
+            file.file_location.is_none(),
+            "truncated chain must have no location"
+        );
+    }
+
+    #[test]
+    fn zero_size_file_has_no_location() {
+        let mut img = make_fat12_image();
+        let rd = 512 * 3;
+        img[rd + 28..rd + 32].copy_from_slice(&0u32.to_le_bytes()); // file_size = 0
+        let mut cursor = Cursor::new(&img);
+        let tree = detect_and_parse(&mut cursor).unwrap();
+        let file = &tree.children[0];
+        assert_eq!(file.size, 0);
+        assert!(file.file_location.is_none());
+    }
+
+    // ── FAT32 root dir via cluster chain (covers read_dir_bytes chain path) ───
+
+    #[test]
+    fn fat32_small_empty_root_parses_ok() {
+        // Tiny FAT32 image using FAT32-by-signature (root_entry_count=0, fat_size_16=0).
+        // data_start = 1*512 + 2*1*512 = 1536; cluster 2 at offset 1536.
+        let mut img = vec![0u8; 2048];
+        img[11..13].copy_from_slice(&512u16.to_le_bytes());
+        img[13] = 1; // sectors_per_cluster
+        img[14..16].copy_from_slice(&1u16.to_le_bytes()); // reserved = 1
+        img[16] = 2; // num_fats
+                     // root_entry_count = 0 (stays zero)
+        img[22..24].copy_from_slice(&0u16.to_le_bytes()); // fat_size_16 = 0
+        img[32..36].copy_from_slice(&4u32.to_le_bytes()); // total_sectors_32 (non-zero)
+        img[36..40].copy_from_slice(&1u32.to_le_bytes()); // fat_size_32 = 1 sector
+        img[44..48].copy_from_slice(&2u32.to_le_bytes()); // root_cluster = 2
+        img[510] = 0x55;
+        img[511] = 0xAA;
+        // FAT1 at offset 512: cluster 2 = EOC
+        img[512 + 8] = 0xFF;
+        img[512 + 9] = 0xFF;
+        img[512 + 10] = 0xFF;
+        img[512 + 11] = 0x0F;
+        // Root dir at offset 1536: all zeros → empty directory
+        let mut cursor = Cursor::new(&img);
+        let tree = detect_and_parse(&mut cursor).unwrap();
+        assert_eq!(tree.name, "/");
+        assert_eq!(tree.children.len(), 0);
+    }
+
+    // ── From<io::Error> ───────────────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io_err = std::io::Error::other("disk error");
+        let err: Error = Error::from(io_err);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("short") || msg.contains("FAT"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_boot_sector() {
+        let msg = format!("{}", Error::BadBootSector);
+        assert!(
+            msg.contains("BPB") || msg.contains("boot") || msg.contains("FAT"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(std::io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadBootSector.source().is_none());
+    }
+
+    // ── is_eoc / is_bad_cluster for FAT16 and FAT32 ───────────────────────────
+
+    #[test]
+    fn is_eoc_fat16_and_fat32() {
+        assert!(is_eoc(FatType::Fat16, 0xFFF8));
+        assert!(is_eoc(FatType::Fat16, 0xFFFF));
+        assert!(!is_eoc(FatType::Fat16, 0xFFF7));
+        assert!(is_eoc(FatType::Fat32, 0x0FFF_FFF8));
+        assert!(is_eoc(FatType::Fat32, 0x0FFF_FFFF));
+        assert!(!is_eoc(FatType::Fat32, 0x0FFF_FFF7));
+    }
+
+    #[test]
+    fn is_bad_cluster_fat16_and_fat32() {
+        assert!(is_bad_cluster(FatType::Fat16, 0xFFF7));
+        assert!(!is_bad_cluster(FatType::Fat16, 0xFFF8));
+        assert!(is_bad_cluster(FatType::Fat32, 0x0FFF_FFF7));
+        assert!(!is_bad_cluster(FatType::Fat32, 0x0FFF_FFF8));
+    }
 }

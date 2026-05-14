@@ -1160,4 +1160,988 @@ mod tests {
             "large file has no single-run location"
         );
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(
+            msg.contains("short") || msg.contains("superblock"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_superblock() {
+        let msg = format!("{}", Error::BadSuperblock);
+        assert!(
+            msg.contains("superblock") || msg.contains("0xEF53"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::other("disk fail");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk fail"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = std::io::Error::other("src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadSuperblock.source().is_none());
+    }
+
+    // ── From<io::Error> ──────────────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io = std::io::Error::other("disk");
+        let err = Error::from(io);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── Superblock::desc_size_effective with INCOMPAT_64BIT ──────────────────
+
+    #[test]
+    fn desc_size_effective_returns_desc_size_when_64bit() {
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 0,
+            log_block_size: 2, // 4 KiB blocks
+            inode_size: 256,
+            feature_incompat: INCOMPAT_64BIT,
+            desc_size: 64,
+        };
+        assert_eq!(sb.desc_size_effective(), 64);
+    }
+
+    // ── detect_and_parse error paths ─────────────────────────────────────────
+
+    #[test]
+    fn detect_and_parse_too_short_for_superblock() {
+        // Magic at the right place, but image too short for read_superblock (264 bytes needed).
+        let mut img = vec![0u8; 1100];
+        img[1024 + 56..1024 + 58].copy_from_slice(&EXT_MAGIC.to_le_bytes());
+        let mut c = Cursor::new(img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn detect_and_parse_bad_superblock_magic() {
+        let img = vec![0u8; 2048]; // enough bytes, magic = 0x0000 (wrong)
+        let mut c = Cursor::new(img);
+        assert!(matches!(
+            detect_and_parse(&mut c),
+            Err(Error::BadSuperblock)
+        ));
+    }
+
+    // ── Inode::file_type_char ─────────────────────────────────────────────────
+
+    #[test]
+    fn inode_file_type_char_char_device() {
+        // S_IFCHR = 0x2000; (0x2000 & S_IFMT) >> 12 = 2
+        let inode = Inode {
+            mode: 0x2000,
+            size: 0,
+            flags: 0,
+            i_block: [0; 15],
+        };
+        assert_eq!(inode.file_type_char(), 2);
+    }
+
+    // ── read_inode with inode_num == 0 ────────────────────────────────────────
+
+    #[test]
+    fn read_inode_with_zero_num_returns_bad_superblock() {
+        let img = make_ext2_image();
+        let mut c = Cursor::new(img);
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let result = read_inode(&mut c, &sb, 0, 0);
+        assert!(matches!(result, Err(Error::BadSuperblock)));
+    }
+
+    // ── Superblock sanity checks ──────────────────────────────────────────────
+
+    fn make_corrupt_image<F: Fn(&mut Vec<u8>)>(corrupt: F) -> Vec<u8> {
+        let mut img = make_ext2_image();
+        corrupt(&mut img);
+        img
+    }
+
+    #[test]
+    fn rejects_log_block_size_too_large() {
+        let img = make_corrupt_image(|img| {
+            // s_log_block_size at offset 1024+24: set to 7 (would be 128 KiB).
+            img[1024 + 24..1024 + 28].copy_from_slice(&7u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    #[test]
+    fn rejects_blocks_per_group_zero() {
+        let img = make_corrupt_image(|img| {
+            img[1024 + 32..1024 + 36].copy_from_slice(&0u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    #[test]
+    fn rejects_blocks_count_zero() {
+        let img = make_corrupt_image(|img| {
+            img[1024 + 4..1024 + 8].copy_from_slice(&0u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    #[test]
+    fn rejects_inodes_per_group_zero() {
+        let img = make_corrupt_image(|img| {
+            img[1024 + 40..1024 + 44].copy_from_slice(&0u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    // ── Rev_level 0 path ──────────────────────────────────────────────────────
+
+    #[test]
+    fn rev_level_zero_uses_defaults() {
+        // Set rev_level = 0; parser should use fixed 128-byte inodes, no extents.
+        let mut img = make_ext2_image();
+        img[1024 + 76..1024 + 80].copy_from_slice(&0u32.to_le_bytes());
+        // Also zero the feature_incompat field to be safe.
+        img[1024 + 96..1024 + 100].copy_from_slice(&0u32.to_le_bytes());
+        let mut c = cursor_of(&img);
+        // Should still parse OK; rev_level 0 just sets defaults.
+        let root = detect_and_parse(&mut c).expect("rev_level 0 should still parse");
+        assert_eq!(root.name, "/");
+    }
+
+    // ── Inode size > block_size rejects ───────────────────────────────────────
+
+    #[test]
+    fn rejects_inode_size_larger_than_block_size() {
+        // inode_size = 4096, block_size = 1024 → invalid.
+        let img = make_corrupt_image(|img| {
+            img[1024 + 88..1024 + 90].copy_from_slice(&4096u16.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    // ── Extent tree path ──────────────────────────────────────────────────────
+
+    fn make_ext4_extent_image() -> Vec<u8> {
+        // Like make_ext2_image but the file inode uses an extent tree.
+        const BS: usize = 1024;
+        const INODE_SIZE: usize = 128;
+        const INODE_TABLE_BLK: usize = 5;
+        const FILE_DATA_BLK: usize = 7;
+        const FILE_INUM: usize = 3;
+
+        let mut img = make_ext2_image(); // start from the classical image
+
+        // Enable EXT4_EXTENTS_FL on the file inode (#3).
+        let inode_base = INODE_TABLE_BLK * BS;
+        let file_off = inode_base + (FILE_INUM - 1) * INODE_SIZE;
+        // Set i_flags = EXT4_EXTENTS_FL (0x80000)
+        img[file_off + 32..file_off + 36].copy_from_slice(&0x0008_0000u32.to_le_bytes());
+
+        // Build an extent tree in i_block (60 bytes at file_off+40).
+        // Header: magic=0xF30A, entries=1, max=4, depth=0, generation=0
+        let extent_area = &mut img[file_off + 40..file_off + 100];
+        extent_area[..2].copy_from_slice(&0xF30Au16.to_le_bytes()); // magic
+        extent_area[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries
+        extent_area[4..6].copy_from_slice(&4u16.to_le_bytes()); // max
+        extent_area[6..8].copy_from_slice(&0u16.to_le_bytes()); // depth = 0 (leaf)
+        extent_area[8..12].copy_from_slice(&0u32.to_le_bytes()); // generation
+                                                                 // Leaf extent at offset 12: ee_block=0, ee_len=1, ee_start_hi=0, ee_start_lo=FILE_DATA_BLK
+        extent_area[12..16].copy_from_slice(&0u32.to_le_bytes()); // ee_block (logical)
+        extent_area[16..18].copy_from_slice(&1u16.to_le_bytes()); // ee_len = 1 block
+        extent_area[18..20].copy_from_slice(&0u16.to_le_bytes()); // ee_start_hi
+        extent_area[20..24].copy_from_slice(&(FILE_DATA_BLK as u32).to_le_bytes()); // ee_start_lo
+
+        img
+    }
+
+    #[test]
+    fn parse_ext4_extent_tree_file() {
+        let img = make_ext4_extent_image();
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("extent tree parse failed");
+        let file = root
+            .children
+            .iter()
+            .find(|n| n.name == "hello.txt")
+            .unwrap();
+        assert_eq!(file.size, 12);
+        // Single extent → file_location should be set.
+        assert!(
+            file.file_location.is_some(),
+            "single-extent file should have file_location"
+        );
+    }
+
+    // ── parse_extent_header with bad magic ───────────────────────────────────
+
+    #[test]
+    fn parse_extent_header_bad_magic_returns_none() {
+        let mut data = vec![0u8; 60];
+        data[0..2].copy_from_slice(&0xDEADu16.to_le_bytes()); // wrong magic
+        assert!(parse_extent_header(&data).is_none());
+    }
+
+    #[test]
+    fn parse_extent_header_too_short_returns_none() {
+        let data = vec![0u8; 4]; // < 12 bytes required
+        assert!(parse_extent_header(&data).is_none());
+    }
+
+    // ── Inline data (EXT4_INLINE_DATA_FL) ────────────────────────────────────
+
+    #[test]
+    fn inline_data_file_has_no_location() {
+        let mut img = make_ext2_image();
+        const INODE_TABLE_BLK: usize = 5;
+        const BS: usize = 1024;
+        const INODE_SIZE: usize = 128;
+        const FILE_INUM: usize = 3;
+        let file_off = INODE_TABLE_BLK * BS + (FILE_INUM - 1) * INODE_SIZE;
+        // Set EXT4_INLINE_DATA_FL (bit 28) in i_flags.
+        let flags: u32 = 0x1000_0000;
+        img[file_off + 32..file_off + 36].copy_from_slice(&flags.to_le_bytes());
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("inline data parse failed");
+        let file = root
+            .children
+            .iter()
+            .find(|n| n.name == "hello.txt")
+            .unwrap();
+        assert!(
+            file.file_location.is_none(),
+            "inline-data file should have no file_location"
+        );
+    }
+
+    // ── Symlink inode in tree ────────────────────────────────────────────────
+
+    fn make_ext2_with_symlink() -> Vec<u8> {
+        // Extend the base image: add a symlink inode (#4) to the root dir.
+        const BS: usize = 1024;
+        const INODE_TABLE_BLK: usize = 5;
+        const INODE_SIZE: usize = 128;
+        const ROOT_DATA_BLK: usize = 6;
+        const SYMLINK_INUM: usize = 4;
+
+        let mut img = make_ext2_image();
+
+        // Set up symlink inode #4 at index 3 in the inode table.
+        let symlink_off = INODE_TABLE_BLK * BS + (SYMLINK_INUM - 1) * INODE_SIZE;
+        let mode: u16 = S_IFLNK | 0o777;
+        img[symlink_off..symlink_off + 2].copy_from_slice(&mode.to_le_bytes());
+        img[symlink_off + 4..symlink_off + 8].copy_from_slice(&7u32.to_le_bytes()); // size=7 "foo/bar"
+
+        // Add a new directory entry for "link" → inode 4.
+        // We'll insert it after the existing entries in the root data block.
+        // Existing entries end at offset 24+9=33, rounded up to 36.
+        // We need to shrink the last entry's rec_len to make room.
+        let dir_base = ROOT_DATA_BLK * BS;
+        // The last entry (hello.txt at offset 24) currently spans to end of block.
+        // Resize it to fit exactly: name_len=9 → rec_len=20 (8 header + 9 name + 3 pad).
+        let new_rec_len: u16 = 20;
+        img[dir_base + 24 + 4..dir_base + 24 + 6].copy_from_slice(&new_rec_len.to_le_bytes());
+
+        // New entry at offset 44: "link" → inode 4.
+        let e_off = 44;
+        let e_rec: u16 = (BS - e_off) as u16;
+        img[dir_base + e_off..dir_base + e_off + 4]
+            .copy_from_slice(&(SYMLINK_INUM as u32).to_le_bytes());
+        img[dir_base + e_off + 4..dir_base + e_off + 6].copy_from_slice(&e_rec.to_le_bytes());
+        img[dir_base + e_off + 6] = 4; // name_len = "link"
+        img[dir_base + e_off + 7] = 7; // file_type = symlink
+        img[dir_base + e_off + 8..dir_base + e_off + 12].copy_from_slice(b"link");
+
+        img
+    }
+
+    #[test]
+    fn symlink_appears_in_tree() {
+        let img = make_ext2_with_symlink();
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("symlink image parse failed");
+        let link = root.find_node("/link");
+        assert!(link.is_some(), "symlink should appear in the tree");
+        let link = link.unwrap();
+        assert!(!link.is_directory);
+        // Symlinks don't get file_location.
+        assert!(link.file_location.is_none());
+    }
+
+    // ── Non-contiguous blocks → no file_location ─────────────────────────────
+
+    #[test]
+    fn discontiguous_blocks_no_file_location() {
+        let mut img = make_ext2_image();
+        const INODE_TABLE_BLK: usize = 5;
+        const BS: usize = 1024;
+        const INODE_SIZE: usize = 128;
+        const FILE_INUM: usize = 3;
+        let file_off = INODE_TABLE_BLK * BS + (FILE_INUM - 1) * INODE_SIZE;
+        // Make file large enough to need 2 blocks, but make them non-contiguous.
+        img[file_off + 4..file_off + 8].copy_from_slice(&(2048u32).to_le_bytes()); // 2 KB
+                                                                                   // i_block[0] = 7 (existing), i_block[1] = 9 (skipping 8 → discontiguous).
+        img[file_off + 44..file_off + 48].copy_from_slice(&9u32.to_le_bytes()); // i_block[1] = 9
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        let file = root
+            .children
+            .iter()
+            .find(|n| n.name == "hello.txt")
+            .unwrap();
+        assert!(
+            file.file_location.is_none(),
+            "discontiguous blocks should yield no file_location"
+        );
+    }
+
+    // ── read_bgd with 64-bit descriptor ──────────────────────────────────────
+
+    #[test]
+    fn read_bgd_uses_64bit_inode_table_hi() {
+        // Superblock with INCOMPAT_64BIT and desc_size=64, 1KB blocks.
+        // bgd_table_offset = base_offset + (first_data_block + 1) * block_size
+        //                  = 0 + 2 * 1024 = 2048.
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_64BIT,
+            desc_size: 64,
+        };
+        // Image must be at least 2048 + 64 bytes.
+        let mut img = vec![0u8; 3072];
+        // Write the BGD at offset 2048:
+        //   inode_table_lo at bytes 8..12 → 5
+        //   inode_table_hi at bytes 40..44 → 2
+        img[2048 + 8..2048 + 12].copy_from_slice(&5u32.to_le_bytes());
+        img[2048 + 40..2048 + 44].copy_from_slice(&2u32.to_le_bytes());
+        let mut c = Cursor::new(img);
+        let bgd = read_bgd(&mut c, &sb, 0, 0).expect("read_bgd should succeed");
+        // inode_table = (2 << 32) | 5 = 8589934597
+        assert_eq!(bgd.inode_table, (2u64 << 32) | 5u64);
+    }
+
+    // ── parse_idx_entries ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_idx_entries_one_entry() {
+        // Build a buffer with one index entry at offset 12.
+        // Bytes 16..20 = leaf_lo = 7, bytes 20..22 = leaf_hi = 0.
+        let mut data = vec![0u8; 24];
+        // Header (bytes 0..12): magic + counts etc. — content ignored by this function.
+        data[16..20].copy_from_slice(&7u32.to_le_bytes()); // leaf_lo
+        data[20..22].copy_from_slice(&0u16.to_le_bytes()); // leaf_hi
+        let entries = parse_idx_entries(&data, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].leaf, 7);
+    }
+
+    #[test]
+    fn parse_idx_entries_overflow_breaks() {
+        // entries = 2 but buffer only has room for 1 → the second iteration
+        // hits `off + 12 > data.len()` and breaks.
+        let data = vec![0u8; 24]; // room for exactly one 12-byte entry at offset 12
+        let entries = parse_idx_entries(&data, 2);
+        assert_eq!(entries.len(), 1);
+    }
+
+    // ── collect_extents with internal node (depth > 0) ────────────────────────
+
+    #[test]
+    fn collect_extents_follows_internal_node_to_leaf() {
+        // Build a two-level extent tree in memory.
+        //
+        // Root node (i_block area, 60 bytes): depth=1, 1 index entry → child at block 3.
+        // Child block (block 3, offset 3*1024=3072): depth=0, 1 leaf entry → phys block 10.
+        //
+        // We need an image of at least 3072 + 1024 = 4096 bytes.
+        const BS: usize = 1024;
+        let mut img = vec![0u8; 5 * BS];
+
+        let em = EXTENT_MAGIC.to_le_bytes();
+
+        // Root node (60 bytes; only first 24 are relevant here).
+        let mut root = vec![0u8; 60];
+        root[0..2].copy_from_slice(&em); // magic
+        root[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        root[4..6].copy_from_slice(&4u16.to_le_bytes()); // max = 4
+        root[6..8].copy_from_slice(&1u16.to_le_bytes()); // depth = 1 (internal)
+                                                         // Index entry at bytes 12..24:
+                                                         //   ei_block at [12..16] = 0
+                                                         //   ei_leaf_lo at [16..20] = 3 (child is at block 3)
+                                                         //   ei_leaf_hi at [20..22] = 0
+        root[16..20].copy_from_slice(&3u32.to_le_bytes());
+
+        // Child block at offset 3 * BS = 3072:
+        img[3 * BS..3 * BS + 2].copy_from_slice(&em);
+        img[3 * BS + 2..3 * BS + 4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        img[3 * BS + 4..3 * BS + 6].copy_from_slice(&4u16.to_le_bytes()); // max = 4
+        img[3 * BS + 6..3 * BS + 8].copy_from_slice(&0u16.to_le_bytes()); // depth = 0 (leaf)
+                                                                          // Leaf entry at bytes 12..24:
+                                                                          //   ee_block at [12..16] = 0
+                                                                          //   ee_len at [16..18] = 1 (1 block, not unwritten)
+                                                                          //   ee_start_hi at [18..20] = 0
+                                                                          //   ee_start_lo at [20..24] = 10
+        img[3 * BS + 16..3 * BS + 18].copy_from_slice(&1u16.to_le_bytes()); // ee_len = 1
+        img[3 * BS + 20..3 * BS + 24].copy_from_slice(&10u32.to_le_bytes()); // phys = 10
+
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(img);
+        let extents = collect_extents(&mut c, &sb, 0, &root, 5).expect("collect_extents");
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].phys, 10);
+        assert_eq!(extents[0].len, 1);
+        assert!(!extents[0].unwritten);
+    }
+
+    // ── single_run_location edge cases ────────────────────────────────────────
+
+    #[test]
+    fn single_run_location_returns_none_for_empty_inode() {
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 0,
+            flags: 0,
+            i_block: [0; 15],
+        };
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let loc = single_run_location(&mut c, &sb, 0, &inode).unwrap();
+        assert!(loc.is_none());
+    }
+
+    #[test]
+    fn single_run_location_returns_none_for_inline_inode() {
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 10,
+            flags: EXT4_INLINE_DATA_FL,
+            i_block: [0; 15],
+        };
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let loc = single_run_location(&mut c, &sb, 0, &inode).unwrap();
+        assert!(loc.is_none());
+    }
+
+    #[test]
+    fn single_run_location_extent_unwritten_returns_none() {
+        // Build an inode with EXT4_EXTENTS_FL and a single UNWRITTEN extent.
+        // single_run_location should return None because unwritten extents
+        // contain stale on-disk data.
+        let em = EXTENT_MAGIC.to_le_bytes();
+        let mut i_block_bytes = [0u8; 60];
+        i_block_bytes[0..2].copy_from_slice(&em); // magic
+        i_block_bytes[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        i_block_bytes[4..6].copy_from_slice(&4u16.to_le_bytes()); // max
+        i_block_bytes[6..8].copy_from_slice(&0u16.to_le_bytes()); // depth = 0 (leaf)
+                                                                  // Leaf entry: ee_len = 0x8001 (unwritten flag in high bit + len=1)
+        i_block_bytes[16..18].copy_from_slice(&0x8001u16.to_le_bytes()); // unwritten
+        i_block_bytes[20..24].copy_from_slice(&5u32.to_le_bytes()); // phys = 5
+
+        // Convert bytes to i_block [u32; 15].
+        let mut i_block = [0u32; 15];
+        for (i, slot) in i_block.iter_mut().enumerate() {
+            let off = i * 4;
+            *slot = u32::from_le_bytes(i_block_bytes[off..off + 4].try_into().unwrap());
+        }
+
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 1024,
+            flags: EXT4_EXTENTS_FL,
+            i_block,
+        };
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let loc = single_run_location(&mut c, &sb, 0, &inode).unwrap();
+        assert!(loc.is_none(), "unwritten extent should yield no location");
+    }
+
+    #[test]
+    fn collect_extents_bad_magic_returns_empty() {
+        // node_data with bad magic → parse_extent_header returns None → empty vec.
+        let data = vec![0u8; 60]; // all zeros, magic = 0x0000 ≠ EXTENT_MAGIC
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let extents = collect_extents(&mut c, &sb, 0, &data, 5).unwrap();
+        assert!(extents.is_empty());
+    }
+
+    #[test]
+    fn collect_extents_remaining_depth_zero_returns_empty() {
+        // A node with depth=1 (internal) but remaining_depth=0 → safety cap, returns empty.
+        let em = EXTENT_MAGIC.to_le_bytes();
+        let mut data = vec![0u8; 60];
+        data[0..2].copy_from_slice(&em); // magic
+        data[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        data[6..8].copy_from_slice(&1u16.to_le_bytes()); // depth = 1 (internal)
+
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let extents = collect_extents(&mut c, &sb, 0, &data, 0).unwrap();
+        assert!(extents.is_empty());
+    }
+
+    #[test]
+    fn parse_leaf_extents_overflow_breaks() {
+        // entries=3 but data only has room for 2 entries after the header (36 bytes).
+        // Third iteration: off = 12 + 2*12 = 36, off+12 = 48 > 36 → break.
+        let mut data = vec![0u8; 36]; // header (12) + 2 entries (24) = 36 bytes
+                                      // Fill the two valid entries.
+        data[16..18].copy_from_slice(&1u16.to_le_bytes()); // ee_len for entry 0
+        data[28..30].copy_from_slice(&1u16.to_le_bytes()); // ee_len for entry 1
+        let extents = parse_leaf_extents(&data, 3);
+        assert_eq!(extents.len(), 2, "should stop at 2 due to buffer overflow");
+    }
+
+    // ── read_ptr_block + single-indirect directory ────────────────────────────
+
+    /// Make an ext2 image where the root directory's data is reached via a
+    /// single-indirect block pointer (i_block[12]) rather than a direct pointer.
+    /// Layout (1 KiB blocks):
+    ///   0: boot  1: superblock  2: BGD  3: block-bitmap  4: inode-bitmap
+    ///   5: inode-table  6: dir data  7: file data  8: SI pointer block
+    fn make_ext2_single_indirect_dir() -> Vec<u8> {
+        const BS: usize = 1024;
+        const INODE_SIZE: usize = 128;
+        const INODES_PER_GROUP: usize = 256;
+        const TOTAL_BLOCKS: usize = 256;
+        const INODE_TABLE_BLK: usize = 5;
+        const DIR_DATA_BLK: usize = 6;
+        const FILE_DATA_BLK: usize = 7;
+        const SI_BLK: usize = 8; // single-indirect pointer block
+        const ROOT_INUM: usize = 2;
+        const FILE_INUM: usize = 3;
+
+        let mut img = vec![0u8; (TOTAL_BLOCKS + 4) * BS];
+
+        // Superblock at block 1.
+        {
+            let sb = &mut img[BS..BS + 264];
+            sb[0..4].copy_from_slice(&(INODES_PER_GROUP as u32).to_le_bytes());
+            sb[4..8].copy_from_slice(&(TOTAL_BLOCKS as u32).to_le_bytes());
+            sb[20..24].copy_from_slice(&1u32.to_le_bytes()); // s_first_data_block=1
+            sb[24..28].copy_from_slice(&0u32.to_le_bytes()); // log_block_size=0 → 1 KiB
+            sb[32..36].copy_from_slice(&(TOTAL_BLOCKS as u32).to_le_bytes());
+            sb[40..44].copy_from_slice(&(INODES_PER_GROUP as u32).to_le_bytes());
+            sb[56..58].copy_from_slice(&EXT_MAGIC.to_le_bytes());
+            sb[76..80].copy_from_slice(&1u32.to_le_bytes()); // rev_level=1
+            sb[84..88].copy_from_slice(&11u32.to_le_bytes()); // first_ino=11
+            sb[88..90].copy_from_slice(&(INODE_SIZE as u16).to_le_bytes());
+            sb[96..100].copy_from_slice(&INCOMPAT_FILETYPE.to_le_bytes());
+            sb[236..238].copy_from_slice(&32u16.to_le_bytes()); // desc_size=32
+        }
+
+        // BGD at block 2.
+        {
+            let bgd = &mut img[2 * BS..2 * BS + 32];
+            bgd[0..4].copy_from_slice(&3u32.to_le_bytes()); // block_bitmap
+            bgd[4..8].copy_from_slice(&4u32.to_le_bytes()); // inode_bitmap
+            bgd[8..12].copy_from_slice(&(INODE_TABLE_BLK as u32).to_le_bytes());
+        }
+
+        // Root dir inode (#2): i_block[0]=0 (no direct block), i_block[12]=SI_BLK.
+        {
+            let off = INODE_TABLE_BLK * BS + (ROOT_INUM - 1) * INODE_SIZE;
+            let ino = &mut img[off..off + INODE_SIZE];
+            ino[0..2].copy_from_slice(&(S_IFDIR | 0o755).to_le_bytes());
+            ino[4..8].copy_from_slice(&(BS as u32).to_le_bytes()); // size=1024
+            ino[26..28].copy_from_slice(&2u16.to_le_bytes());
+            ino[32..36].copy_from_slice(&0u32.to_le_bytes()); // no extents
+                                                              // i_block[0..12] = 0 (no direct blocks)
+                                                              // i_block[12] = SI_BLK (single-indirect pointer block)
+            let si_offset = 40 + 12 * 4;
+            ino[si_offset..si_offset + 4].copy_from_slice(&(SI_BLK as u32).to_le_bytes());
+        }
+
+        // File inode (#3).
+        {
+            let off = INODE_TABLE_BLK * BS + (FILE_INUM - 1) * INODE_SIZE;
+            let ino = &mut img[off..off + INODE_SIZE];
+            ino[0..2].copy_from_slice(&(S_IFREG | 0o644).to_le_bytes());
+            ino[4..8].copy_from_slice(&12u32.to_le_bytes());
+            ino[26..28].copy_from_slice(&1u16.to_le_bytes());
+            ino[40..44].copy_from_slice(&(FILE_DATA_BLK as u32).to_le_bytes());
+        }
+
+        // Single-indirect pointer block: first pointer = DIR_DATA_BLK.
+        {
+            let off = SI_BLK * BS;
+            img[off..off + 4].copy_from_slice(&(DIR_DATA_BLK as u32).to_le_bytes());
+        }
+
+        // Directory data block: ".", "..", "hello.txt".
+        {
+            let d = &mut img[DIR_DATA_BLK * BS..DIR_DATA_BLK * BS + BS];
+            // "."
+            d[0..4].copy_from_slice(&(ROOT_INUM as u32).to_le_bytes());
+            d[4..6].copy_from_slice(&12u16.to_le_bytes());
+            d[6] = 1;
+            d[7] = 2;
+            d[8] = b'.';
+            // ".."
+            d[12..16].copy_from_slice(&(ROOT_INUM as u32).to_le_bytes());
+            d[16..18].copy_from_slice(&12u16.to_le_bytes());
+            d[18] = 2;
+            d[19] = 2;
+            d[20] = b'.';
+            d[21] = b'.';
+            // "hello.txt"
+            let name = b"hello.txt";
+            d[24..28].copy_from_slice(&(FILE_INUM as u32).to_le_bytes());
+            d[28..30].copy_from_slice(&((BS - 24) as u16).to_le_bytes());
+            d[30] = name.len() as u8;
+            d[31] = 1; // file_type=regular
+            d[32..32 + name.len()].copy_from_slice(name);
+        }
+
+        // File data block.
+        img[FILE_DATA_BLK * BS..FILE_DATA_BLK * BS + 12].copy_from_slice(b"hello world\n");
+
+        img
+    }
+
+    #[test]
+    fn single_indirect_dir_parsed_correctly() {
+        // Root directory uses i_block[12] (single-indirect) → exercises read_ptr_block
+        // and the SI branch of collect_classical_blocks (lines 469-483, 518-525).
+        let img = make_ext2_single_indirect_dir();
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("SI dir image should parse");
+        assert_eq!(root.name, "/");
+        let child = root.children.iter().find(|n| n.name == "hello.txt");
+        assert!(child.is_some(), "hello.txt should appear via SI dir");
+    }
+
+    // ── Extent-based directory reading (read_dir_entries extent path) ─────────
+
+    fn make_ext4_extent_dir() -> Vec<u8> {
+        // Root dir inode has EXT4_EXTENTS_FL; its extent tree points to DIR_DATA_BLK.
+        const BS: usize = 1024;
+        let mut img = make_ext2_single_indirect_dir();
+        const INODE_SIZE: usize = 128;
+        const INODE_TABLE_BLK: usize = 5;
+        const ROOT_INUM: usize = 2;
+        const DIR_DATA_BLK: usize = 6;
+
+        let off = INODE_TABLE_BLK * BS + (ROOT_INUM - 1) * INODE_SIZE;
+        // Set EXT4_EXTENTS_FL on root inode.
+        img[off + 32..off + 36].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
+        // Clear all i_block bytes, then write extent tree.
+        img[off + 40..off + 100].fill(0);
+        let ea = &mut img[off + 40..off + 100];
+        ea[0..2].copy_from_slice(&EXTENT_MAGIC.to_le_bytes());
+        ea[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries=1
+        ea[4..6].copy_from_slice(&4u16.to_le_bytes()); // max=4
+        ea[6..8].copy_from_slice(&0u16.to_le_bytes()); // depth=0 (leaf)
+                                                       // Leaf extent at offset 12: ee_block=0, ee_len=1, phys=DIR_DATA_BLK.
+        ea[12..16].copy_from_slice(&0u32.to_le_bytes());
+        ea[16..18].copy_from_slice(&1u16.to_le_bytes()); // ee_len=1
+        ea[18..20].copy_from_slice(&0u16.to_le_bytes()); // ee_start_hi
+        ea[20..24].copy_from_slice(&(DIR_DATA_BLK as u32).to_le_bytes());
+        img
+    }
+
+    #[test]
+    fn extent_dir_read_entries_extent_path() {
+        // Root directory uses EXT4_EXTENTS_FL → read_dir_entries takes extent
+        // branch (lines 631-640) to reach directory data.
+        let img = make_ext4_extent_dir();
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("extent dir image should parse");
+        assert_eq!(root.name, "/");
+        let child = root.children.iter().find(|n| n.name == "hello.txt");
+        assert!(child.is_some(), "hello.txt should appear via extent dir");
+    }
+
+    // ── scan_dir_block: bad rec_len triggers break ────────────────────────────
+
+    #[test]
+    fn scan_dir_block_bad_rec_len_breaks() {
+        // Entry at offset 0 has rec_len=4 < 8 → break immediately (line 603).
+        let mut data = vec![0u8; 64];
+        data[0..4].copy_from_slice(&2u32.to_le_bytes()); // inode=2 (non-zero)
+        data[4..6].copy_from_slice(&4u16.to_le_bytes()); // rec_len=4 < 8 → break
+        data[6] = 1; // name_len
+        let mut entries: Vec<DirEntry> = Vec::new();
+        scan_dir_block(&data, false, &mut entries);
+        assert!(entries.is_empty(), "bad rec_len should break immediately");
+    }
+
+    // ── single_run_location: first block zero → None ──────────────────────────
+
+    #[test]
+    fn single_run_location_first_block_zero_returns_none() {
+        // Regular file with size=12 but i_block[0]=0 → first=0 → Ok(None) (line 709).
+        let inode = Inode {
+            mode: S_IFREG | 0o644,
+            size: 12,
+            flags: 0,
+            i_block: [0; 15], // all zero → first=i_block[0]=0
+        };
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let loc = single_run_location(&mut c, &sb, 0, &inode).unwrap();
+        assert!(loc.is_none(), "zero first block → no location");
+    }
+
+    // ── build_tree: block-device inode is skipped ─────────────────────────────
+
+    #[test]
+    fn block_device_inode_skipped_in_tree() {
+        // Add a block-device inode (#4) to the root directory; build_tree returns
+        // None for it (lines 767-768: else branch of is_dir/is_reg/is_symlink).
+        const BS: usize = 1024;
+        const INODE_SIZE: usize = 128;
+        const INODE_TABLE_BLK: usize = 5;
+        const ROOT_DATA_BLK: usize = 6;
+        const DEVNODE_INUM: usize = 4;
+
+        let mut img = make_ext2_image();
+
+        // Device inode (#4): S_IFBLK = 0x6000.
+        let dev_off = INODE_TABLE_BLK * BS + (DEVNODE_INUM - 1) * INODE_SIZE;
+        img[dev_off..dev_off + 2].copy_from_slice(&0x6000u16.to_le_bytes()); // S_IFBLK
+        img[dev_off + 26..dev_off + 28].copy_from_slice(&1u16.to_le_bytes());
+
+        // Add "devnode" entry to root directory.
+        // Existing layout: "."(12) + ".."(12) + "hello.txt"(fills to 1024).
+        // Shrink hello.txt rec_len to fit, then add devnode after it.
+        let dir = ROOT_DATA_BLK * BS;
+        img[dir + 24 + 4..dir + 24 + 6].copy_from_slice(&20u16.to_le_bytes()); // shrink
+        let e_off = 44;
+        img[dir + e_off..dir + e_off + 4].copy_from_slice(&(DEVNODE_INUM as u32).to_le_bytes());
+        img[dir + e_off + 4..dir + e_off + 6].copy_from_slice(&((BS - e_off) as u16).to_le_bytes());
+        img[dir + e_off + 6] = 7; // name_len = "devnode"
+        img[dir + e_off + 7] = 6; // file_type = block device
+        img[dir + e_off + 8..dir + e_off + 15].copy_from_slice(b"devnode");
+
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("image with device inode should parse");
+        // Device inode is silently skipped → should not appear in tree.
+        assert!(
+            root.find_node("/devnode").is_none(),
+            "device inode should be skipped"
+        );
+        // Regular file is still present.
+        assert!(root.find_node("/hello.txt").is_some());
+    }
+
+    // ── collect_classical_blocks: SI covered-before-si early return ──────────
+
+    #[test]
+    fn classical_blocks_si_covered_before_use() {
+        // If covered >= size after the direct block loop, returns before reaching SI.
+        // The direct block loop covers exactly `size` bytes → line 511 returns.
+        // Use the regular ext2 image: root dir has size=1024, i_block[0]=6 → 1 direct
+        // block covers all 1024 bytes → collect_classical_blocks returns at line 511.
+        // This is the existing make_ext2_image path; SI is never reached for the root.
+        let img = make_ext2_image();
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("parse");
+        assert!(root.find_node("/hello.txt").is_some());
+    }
+
+    // ── collect_classical_blocks: double-indirect path ────────────────────────
+
+    #[test]
+    fn classical_blocks_double_indirect() {
+        // Direct call to collect_classical_blocks exercising the DI path
+        // (lines 532-549, 551-553).
+        // Setup (20 KiB image with 1 KiB blocks):
+        //   blocks 1-12: direct data (12 KB → covered=12288)
+        //   block 13: SI pointer block — all zeros → SI adds nothing, covered stays 12288
+        //   block 14: DI-L1 pointer block → first ptr = block 15
+        //   block 15: DI-L2 pointer block → first ptr = block 16
+        //   block 16: the 13th data block
+        // size = 12289 (one byte past the 12 direct blocks) → DI is needed.
+        const BS: usize = 1024;
+        let mut img = vec![0u8; 20 * BS];
+        // DI-L1 block at 14: pointer to block 15.
+        img[14 * BS..14 * BS + 4].copy_from_slice(&15u32.to_le_bytes());
+        // DI-L2 block at 15: pointer to block 16.
+        img[15 * BS..15 * BS + 4].copy_from_slice(&16u32.to_le_bytes());
+
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0, // 1 KiB blocks
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut i_block = [0u32; 15];
+        for (i, b) in i_block[0..12].iter_mut().enumerate() {
+            *b = (i + 1) as u32; // direct blocks 1..12
+        }
+        i_block[12] = 13; // SI block (all zeros → no extra blocks)
+        i_block[13] = 14; // DI-L1 block
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 12289,
+            flags: 0,
+            i_block,
+        };
+
+        let mut c = Cursor::new(img);
+        let blocks = collect_classical_blocks(&mut c, &sb, 0, &inode, 12289).unwrap();
+        // Should have 12 direct + 1 DI block = 13 total.
+        assert_eq!(blocks.len(), 13);
+        assert_eq!(blocks[0], 1);
+        assert_eq!(blocks[12], 16); // DI-resolved block
+    }
+
+    // ── collect_classical_blocks: triple-indirect path ────────────────────────
+
+    #[test]
+    fn classical_blocks_triple_indirect() {
+        // Direct call to collect_classical_blocks exercising the TI path
+        // (lines 555-578, 580).
+        // Setup (25 KiB image with 1 KiB blocks):
+        //   blocks 1-12: direct (SI=0, DI-L1 all zeros → DI adds nothing)
+        //   block 17: TI-L1 → first ptr = block 18
+        //   block 18: TI-L2 → first ptr = block 19
+        //   block 19: TI-L3 → first ptr = block 20 (the data block)
+        // size = 12289 so TI is reached after direct (12288) + no SI/DI contribution.
+        const BS: usize = 1024;
+        let mut img = vec![0u8; 25 * BS];
+        // TI-L1 at 17: ptr = 18.
+        img[17 * BS..17 * BS + 4].copy_from_slice(&18u32.to_le_bytes());
+        // TI-L2 at 18: ptr = 19.
+        img[18 * BS..18 * BS + 4].copy_from_slice(&19u32.to_le_bytes());
+        // TI-L3 at 19: ptr = 20.
+        img[19 * BS..19 * BS + 4].copy_from_slice(&20u32.to_le_bytes());
+
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut i_block = [0u32; 15];
+        for (i, b) in i_block[0..12].iter_mut().enumerate() {
+            *b = (i + 1) as u32; // direct blocks 1..12
+        }
+        // SI=0, DI=0 → neither adds blocks; proceeds to TI.
+        i_block[14] = 17; // TI-L1 block
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 12289,
+            flags: 0,
+            i_block,
+        };
+
+        let mut c = Cursor::new(img);
+        let blocks = collect_classical_blocks(&mut c, &sb, 0, &inode, 12289).unwrap();
+        // Should have 12 direct + 1 TI block = 13 total.
+        assert_eq!(blocks.len(), 13);
+        assert_eq!(blocks[12], 20); // TI-resolved block
+    }
+
+    // ── build_tree: depth > MAX_DEPTH returns None ────────────────────────────
+
+    #[test]
+    fn build_tree_exceeds_max_depth_returns_none() {
+        // build_tree with depth=MAX_DEPTH+1 → immediately returns Ok(None) (line 732).
+        let img = make_ext2_image();
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut c = cursor_of(&img);
+        let result = build_tree(&mut c, &sb, 0, "deep".to_string(), 2, MAX_DEPTH + 1);
+        assert!(
+            result.unwrap().is_none(),
+            "depth > MAX_DEPTH should return None"
+        );
+    }
 }

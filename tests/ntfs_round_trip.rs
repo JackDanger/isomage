@@ -46,11 +46,11 @@ fn ntfs_detect() {
         return;
     };
 
-    // mkntfs -F -f -s 512 <image> creates a minimal NTFS volume.
-    // We pass the sector count (2048 sectors * 512 = 1 MiB).
+    // mkntfs -F -f -s 512 <image> requires a minimum 1 MiB image.
+    // Use 2 MiB to ensure the tool's internal size check passes.
     let image = RoundTrip::new("ntfs-detect")
         .with(&MKNTFS)
-        .image_size(1024 * 1024)
+        .image_size(2 * 1024 * 1024)
         .args(["-F", "-f", "-s", "512", "$IMAGE"])
         .build_bytes();
 

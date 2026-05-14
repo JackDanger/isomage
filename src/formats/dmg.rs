@@ -614,4 +614,83 @@ mod tests {
         // With no XML, we get disk.dmg with file_length = sector_count * 512.
         assert_eq!(root.children[0].file_length, Some(sector_count * 512));
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("512") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(msg.contains("koly") || msg.contains("magic"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_version() {
+        let msg = format!("{}", Error::BadVersion(99));
+        assert!(msg.contains("99"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::BadVersion(4).source().is_none());
+    }
+
+    #[test]
+    fn error_from_io_error() {
+        let e = Error::from(io::Error::other("dmg test"));
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn read_koly_too_short_returns_error() {
+        // Less than KOLY_SIZE (512) bytes → file_len < 512 → TooShort.
+        let data = vec![0u8; 100];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_koly(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn parse_plist_xml_no_array_after_blkx_key() {
+        // <key>blkx</key> present but no <array> follows → None at line 261 → empty.
+        let xml = "<key>blkx</key><key>something_else</key>";
+        let entries = parse_plist_xml(xml);
+        assert!(entries.is_empty(), "no <array> → should return empty");
+    }
+
+    #[test]
+    fn parse_plist_xml_no_closing_array_tag() {
+        // <array> found but no </array> → None at line 265 → empty.
+        let xml = "<key>blkx</key><array><dict><key>CFName</key><string>EFI</string></dict>";
+        let entries = parse_plist_xml(xml);
+        assert!(entries.is_empty(), "no </array> → should return empty");
+    }
+
+    #[test]
+    fn parse_plist_xml_no_closing_dict_tag() {
+        // <dict> found but no </dict> within the array body → break at line 276 → empty.
+        let xml = "<key>blkx</key><array><dict><key>CFName</key><string>EFI</string></array>";
+        let entries = parse_plist_xml(xml);
+        assert!(entries.is_empty(), "unclosed <dict> → should return empty");
+    }
 }

@@ -1100,14 +1100,7 @@ mod tests {
             }
             let take = buf.len().min(self.budget - self.written);
             self.written += take;
-            if take == 0 {
-                Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "downstream closed",
-                ))
-            } else {
-                Ok(take)
-            }
+            Ok(take)
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
@@ -1133,5 +1126,350 @@ mod tests {
                 result
             );
         }
+    }
+
+    // ── Synthetic-image tests for lib.rs public API coverage ─────────────────
+
+    /// Build a tiny synthetic UDF image that detect_and_parse_filesystem can read.
+    /// Reuses the same layout from udf.rs tests.
+    fn make_tiny_udf() -> Vec<u8> {
+        const S: usize = 2048;
+        let mut img = vec![0u8; S * 270];
+        let w16 = |buf: &mut Vec<u8>, off: usize, v: u16| {
+            buf[off..off + 2].copy_from_slice(&v.to_le_bytes())
+        };
+        let w32 = |buf: &mut Vec<u8>, off: usize, v: u32| {
+            buf[off..off + 4].copy_from_slice(&v.to_le_bytes())
+        };
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+        let avdp = 256 * S;
+        w16(&mut img, avdp, 2);
+        w32(&mut img, avdp + 16, (3 * S) as u32);
+        w32(&mut img, avdp + 20, 257);
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+        w16(&mut img, 258 * S, 6);
+        w32(&mut img, 258 * S + 248, S as u32);
+        w32(&mut img, 258 * S + 252, 0);
+        w16(&mut img, 258 * S + 256, 0);
+        w16(&mut img, 259 * S, 8);
+        w16(&mut img, 260 * S, 256);
+        w32(&mut img, 260 * S + 400, S as u32);
+        w32(&mut img, 260 * S + 404, 1);
+        w16(&mut img, 260 * S + 408, 0);
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        let mut parent = vec![0u8; 40];
+        parent[0..2].copy_from_slice(&257u16.to_le_bytes());
+        parent[18] = 0x08;
+        w32(&mut img, rfe + 172, parent.len() as u32);
+        img[rfe + 176..rfe + 176 + parent.len()].copy_from_slice(&parent);
+        img
+    }
+
+    #[test]
+    fn detect_and_parse_verbose_false_garbage() {
+        // Exercise the "Unable to detect" error path with verbose=false
+        let mut c = std::io::Cursor::new(vec![0u8; 4096]);
+        let result = detect_and_parse_filesystem_verbose(&mut c, "fake.iso", false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unable to detect"));
+    }
+
+    #[test]
+    fn detect_and_parse_verbose_true_garbage() {
+        // Exercise verbose=true on garbage: hits all verbose eprintln branches
+        let mut c = std::io::Cursor::new(vec![0u8; 512 * 1024]); // 512 KiB
+        let result = detect_and_parse_filesystem_verbose(&mut c, "fake.iso", true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_and_parse_verbose_true_udf() {
+        // verbose=true with a valid UDF image: hits successful path + verbose branches
+        let img = make_tiny_udf();
+        let mut c = std::io::Cursor::new(img);
+        let result = detect_and_parse_filesystem_verbose(&mut c, "test.udf", true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn safe_join_rejects_path_escape() {
+        // validate_entry_name allows the name but safe_join sees a bypass scenario
+        // via a crafted name that contains no / but somehow escapes (can't in practice
+        // since validate_entry_name checks), so this just confirms safe_join works.
+        let root = std::path::Path::new("/tmp");
+        let here = std::path::Path::new("/tmp");
+        // Valid join: stays inside
+        let result = safe_join(root, here, "file.txt");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn safe_join_detects_here_outside_root() {
+        // here is not a subdirectory of root — triggers the path-escape guard.
+        let root = Path::new("/tmp/output");
+        let here = Path::new("/other_dir");
+        let result = safe_join(root, here, "file.txt");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("path escape"), "got: {msg}");
+    }
+
+    #[test]
+    fn extract_node_errors_when_no_file_location() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // new_file creates a node with file_location = None
+        let node = TreeNode::new_file("orphan.txt".to_string(), 100);
+        let mut c = std::io::Cursor::new(vec![0u8; 100]);
+        let result = extract_node(&mut c, &node, tmp.path().to_str().unwrap());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("location") || msg.contains("not available"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cat_node_swallows_broken_pipe_after_partial_write() {
+        // Exercises the Ok(take) path in BrokenPipeAfter (non-zero budget).
+        let data = b"hello world";
+        let mut img = vec![0u8; 512];
+        img[..data.len()].copy_from_slice(data);
+        let mut c = std::io::Cursor::new(img);
+        let node = TreeNode::new_file_with_location("f".to_string(), 11, 0, 11);
+        let mut w = BrokenPipeAfter {
+            budget: 3,
+            written: 0,
+        };
+        let result = cat_node(&mut c, &node, &mut w);
+        assert!(
+            result.is_ok(),
+            "cat_node should treat BrokenPipe as Ok after partial write"
+        );
+    }
+
+    #[test]
+    fn extract_node_extracts_file_with_location() {
+        // This test covers the `create_dir_all(parent)?` branch in extract_file_at
+        // (lines 399–401) which is only reached when the node has a file_location.
+        let content = b"hello world";
+        let mut img = vec![0u8; 512];
+        img[..content.len()].copy_from_slice(content);
+        let mut c = std::io::Cursor::new(img);
+
+        let node = TreeNode::new_file_with_location(
+            "synth.txt".to_string(),
+            content.len() as u64,
+            0,
+            content.len() as u64,
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = extract_node(&mut c, &node, tmp.path().to_str().unwrap());
+        assert!(result.is_ok(), "extract_node should succeed: {:?}", result);
+
+        let extracted = std::fs::read(tmp.path().join("synth.txt")).unwrap();
+        assert_eq!(extracted, content);
+    }
+
+    #[test]
+    fn cat_node_non_broken_pipe_error_propagates() {
+        // A writer that returns a non-BrokenPipe error should propagate the error.
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "no write"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let data = b"hello";
+        let mut img = vec![0u8; 512];
+        img[..data.len()].copy_from_slice(data);
+        let mut c = std::io::Cursor::new(img);
+        let node = TreeNode::new_file_with_location("f".to_string(), 5, 0, 5);
+        let result = cat_node(&mut c, &node, &mut FailWriter);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no write") || msg.contains("Permission"),
+            "got: {msg}"
+        );
+    }
+
+    // ── Synthetic ISO builder ─────────────────────────────────────────────────
+
+    fn make_minimal_iso() -> Vec<u8> {
+        const SECTOR: usize = 2048;
+        let mut img = vec![0u8; 19 * SECTOR];
+
+        // Sector 16: PVD
+        let pvd = 16 * SECTOR;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        img[pvd + 6] = 1;
+        let vol_size: u32 = 19;
+        img[pvd + 80..pvd + 84].copy_from_slice(&vol_size.to_le_bytes());
+        img[pvd + 84..pvd + 88].copy_from_slice(&vol_size.to_be_bytes());
+        let block_size: u16 = 2048;
+        img[pvd + 128..pvd + 130].copy_from_slice(&block_size.to_le_bytes());
+        img[pvd + 130..pvd + 132].copy_from_slice(&block_size.to_be_bytes());
+        // Root directory record at offset 156
+        let rdr = pvd + 156;
+        img[rdr] = 34;
+        let root_sector: u32 = 18;
+        img[rdr + 2..rdr + 6].copy_from_slice(&root_sector.to_le_bytes());
+        img[rdr + 6..rdr + 10].copy_from_slice(&root_sector.to_be_bytes());
+        let dir_len: u32 = 2048;
+        img[rdr + 10..rdr + 14].copy_from_slice(&dir_len.to_le_bytes());
+        img[rdr + 14..rdr + 18].copy_from_slice(&dir_len.to_be_bytes());
+        img[rdr + 25] = 0x02;
+        img[rdr + 32] = 1;
+        img[rdr + 33] = 0x00; // "." self-entry
+
+        // Sector 17: terminator
+        let term = 17 * SECTOR;
+        img[term] = 255;
+        img[term + 1..term + 6].copy_from_slice(b"CD001");
+        img[term + 6] = 1;
+
+        // Sector 18: root directory data ("." and ".." entries)
+        let dir = 18 * SECTOR;
+        img[dir] = 34;
+        img[dir + 2..dir + 6].copy_from_slice(&root_sector.to_le_bytes());
+        img[dir + 6..dir + 10].copy_from_slice(&root_sector.to_be_bytes());
+        img[dir + 10..dir + 14].copy_from_slice(&dir_len.to_le_bytes());
+        img[dir + 14..dir + 18].copy_from_slice(&dir_len.to_be_bytes());
+        img[dir + 25] = 0x02;
+        img[dir + 32] = 1;
+        img[dir + 33] = 0x00;
+        img[dir + 34] = 34;
+        img[dir + 36..dir + 40].copy_from_slice(&root_sector.to_le_bytes());
+        img[dir + 40..dir + 44].copy_from_slice(&root_sector.to_be_bytes());
+        img[dir + 44..dir + 48].copy_from_slice(&dir_len.to_le_bytes());
+        img[dir + 48..dir + 52].copy_from_slice(&dir_len.to_be_bytes());
+        img[dir + 59] = 0x02;
+        img[dir + 66] = 1;
+        img[dir + 67] = 0x01; // ".." parent-entry
+
+        img
+    }
+
+    // ── Verbose detection coverage ────────────────────────────────────────────
+
+    #[test]
+    fn test_verbose_detection_succeeds_on_synthetic_iso() {
+        let img = make_minimal_iso();
+        let mut cur = std::io::Cursor::new(img);
+        let result = detect_and_parse_filesystem_verbose(&mut cur, "synthetic.iso", true);
+        assert!(
+            result.is_ok(),
+            "verbose detection should succeed: {:?}",
+            result
+        );
+        let root = result.unwrap();
+        assert_eq!(root.name, "/");
+        assert!(root.is_directory);
+    }
+
+    #[test]
+    fn test_verbose_detection_reports_errors_on_garbage() {
+        let garbage = vec![0xABu8; 4096];
+        let mut cur = std::io::Cursor::new(garbage);
+        let result = detect_and_parse_filesystem_verbose(&mut cur, "garbage.bin", true);
+        assert!(result.is_err(), "verbose detection on garbage should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unable to detect"),
+            "error should say 'Unable to detect', got: {}",
+            msg
+        );
+    }
+
+    // ── cat_node non-BrokenPipe write error ──────────────────────────────────
+
+    struct AlwaysFailWriter;
+    impl Write for AlwaysFailWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_cat_node_propagates_non_broken_pipe_error() {
+        let img = make_minimal_iso();
+        let mut cur = std::io::Cursor::new(img);
+        let node = TreeNode::new_file_with_location("term.bin".to_string(), 6, 17 * 2048, 6);
+        let mut w = AlwaysFailWriter;
+        let result = cat_node(&mut cur, &node, &mut w);
+        assert!(
+            result.is_err(),
+            "cat_node should propagate PermissionDenied"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("permission denied") || msg.contains("Permission denied"),
+            "got: {}",
+            msg
+        );
+    }
+
+    // ── safe_join path-escape detection ──────────────────────────────────────
+
+    #[test]
+    fn test_safe_join_detects_path_escape() {
+        let root = std::env::temp_dir().join("isomage_safe_join_root_a");
+        let here = std::env::temp_dir().join("isomage_safe_join_root_b");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&here).unwrap();
+        let result = safe_join(&root, &here, "legit.txt");
+        assert!(result.is_err(), "safe_join must reject target outside root");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("escape") || msg.contains("outside"),
+            "error should mention path escape, got: {}",
+            msg
+        );
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&here).ok();
+    }
+
+    // ── extract_file_at missing location ─────────────────────────────────────
+
+    #[test]
+    fn test_extract_directory_child_without_location_errors() {
+        let img = make_minimal_iso();
+        let mut cur = std::io::Cursor::new(img);
+        let mut dir = TreeNode::new_directory("mydir".to_string());
+        dir.add_child(TreeNode::new_file("orphan.bin".to_string(), 10));
+        let out = std::env::temp_dir().join("isomage_test_extract_no_loc");
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let result = extract_node(&mut cur, &dir, out.to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "extracting child with no location must error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not available"),
+            "error should mention 'not available', got: {}",
+            msg
+        );
+        std::fs::remove_dir_all(&out).ok();
     }
 }

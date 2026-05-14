@@ -34,12 +34,13 @@
 //! [148] u8[60]  reserved
 //! ```
 //!
-//! ## RESHDR_DISK layout (24 bytes, little-endian)
+//! ## RESHDR_DISK layout (24 bytes, little-endian)  [MS-WIM §2.3]
 //!
 //! ```text
-//! [0]  u64  offset_and_flags   // bits 63-56 = flags, bits 55-0 = file offset
-//! [8]  u64  size               // resource size on disk (compressed)
-//! [16] u64  original_size      // uncompressed resource size
+//! [0]  u8[7]+u8  CBDisk: compressed size in bytes 0–6 (7-byte LE integer),
+//!                        flags in byte 7 (high byte of the 8-byte LE read)
+//! [8]  u64       Offset: byte offset of resource from start of WIM file
+//! [16] u64       CBOriginal: uncompressed size of resource
 //! ```
 //!
 //! `flags & 0x04` indicates the resource is compressed.
@@ -113,28 +114,31 @@ impl From<io::Error> for Error {
 /// Parsed RESHDR_DISK (resource header, 24 bytes).
 #[derive(Debug, Clone, Copy)]
 struct ResHdr {
-    /// Byte offset of the resource within the WIM file.
+    /// Byte offset of the resource within the WIM file (from bytes 8–15).
     offset: u64,
-    /// Size of the resource on disk (compressed, if applicable).
+    /// Compressed size of the resource on disk (from low 56 bits of bytes 0–7).
     /// Reserved for future use when codec support is added.
     #[allow(dead_code)]
     size: u64,
-    /// Original (uncompressed) size of the resource.
+    /// Original (uncompressed) size of the resource (from bytes 16–23).
     original_size: u64,
-    /// RESHDR flags byte extracted from the high byte of `offset_and_flags`.
+    /// RESHDR flags byte (high byte of bytes 0–7, i.e. byte 7 of the field).
     flags: u8,
 }
 
 impl ResHdr {
-    /// Parse a 24-byte RESHDR_DISK slice.
+    /// Parse a 24-byte RESHDR_DISK slice per MS-WIM §2.3.
     fn from_bytes(b: &[u8]) -> Self {
         debug_assert_eq!(b.len(), 24);
-        let offset_and_flags = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
-        let size = u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+        // Bytes 0–7: CBDisk — compressed size in low 56 bits, flags in high 8 bits.
+        let size_and_flags = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+        // Bytes 8–15: Offset — byte offset of resource in WIM file.
+        let offset = u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+        // Bytes 16–23: CBOriginal — uncompressed size.
         let original_size =
             u64::from_le_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]);
-        let flags = (offset_and_flags >> 56) as u8;
-        let offset = offset_and_flags & 0x00FF_FFFF_FFFF_FFFF;
+        let flags = (size_and_flags >> 56) as u8;
+        let size = size_and_flags & 0x00FF_FFFF_FFFF_FFFF;
         ResHdr {
             offset,
             size,
@@ -485,15 +489,13 @@ mod tests {
 
         // offset_table RESHDR at [48..72]: all zeros (not used in detection).
 
-        // xml_data RESHDR at [72..96]:
-        //   offset_and_flags = 208 (offset=208, flags=0x00 in high byte)
-        //   size = xml_len
-        //   original_size = xml_len
-        let xml_offset: u64 = HEADER_SIZE as u64; // immediately after header
-                                                  // flags in bits 63-56: 0x00 (uncompressed)
-        let offset_and_flags: u64 = xml_offset; // high byte is 0
-        hdr[72..80].copy_from_slice(&offset_and_flags.to_le_bytes());
-        hdr[80..88].copy_from_slice(&xml_len.to_le_bytes());
+        // xml_data RESHDR at [72..96] (MS-WIM §2.3 layout):
+        //   [72..80] CBDisk: compressed_size=xml_len, flags=0x00 (uncompressed)
+        //   [80..88] Offset: 208 (XML blob starts immediately after 208-byte header)
+        //   [88..96] CBOriginal: xml_len (same as compressed since uncompressed)
+        let size_and_flags: u64 = xml_len; // flags = 0x00 in high byte
+        hdr[72..80].copy_from_slice(&size_and_flags.to_le_bytes());
+        hdr[80..88].copy_from_slice(&(HEADER_SIZE as u64).to_le_bytes()); // offset = 208
         hdr[88..96].copy_from_slice(&xml_len.to_le_bytes());
 
         // boot_metadata RESHDR at [96..120]: all zeros.
@@ -509,7 +511,7 @@ mod tests {
     /// Build a WIM with a compressed XML resource (flags bit 0x04 set).
     fn build_wim_compressed_xml(image_count: u32) -> Vec<u8> {
         let mut wim = build_wim(image_count, "<WIM></WIM>");
-        // Set flags byte (high byte of offset_and_flags at hdr[79]) to 0x04.
+        // Set flags byte (byte 7 of CBDisk field at hdr[72..80], i.e. hdr[79]) to 0x04.
         wim[79] = RESHDR_FLAG_COMPRESSED;
         wim
     }
@@ -685,5 +687,145 @@ mod tests {
         let encoded = encode_utf16le(s);
         let decoded = utf16le_to_string(&encoded).unwrap();
         assert_eq!(decoded, s);
+    }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("208") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(msg.contains("MSWIM") || msg.contains("magic"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_compressed() {
+        let msg = format!("{}", Error::Compressed);
+        assert!(
+            msg.contains("compress") || msg.contains("WIM"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_encoding() {
+        let msg = format!("{}", Error::BadEncoding);
+        assert!(
+            msg.contains("UTF") || msg.contains("encoding"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::Compressed.source().is_none());
+        assert!(Error::BadEncoding.source().is_none());
+    }
+
+    // ── From<io::Error> conversion ────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io_err = io::Error::other("disk error");
+        let err: Error = Error::from(io_err);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── utf16le_to_string edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn utf16le_to_string_odd_byte_count_returns_error() {
+        let odd = vec![0x41u8, 0x00, 0x42]; // 3 bytes — not a multiple of 2
+        assert!(matches!(utf16le_to_string(&odd), Err(Error::BadEncoding)));
+    }
+
+    // ── parse_attr_u32 edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_attr_u32_single_quotes() {
+        let text = "INDEX='3'";
+        assert_eq!(parse_attr_u32(text, "INDEX"), Some(3));
+    }
+
+    #[test]
+    fn parse_attr_u32_no_quote_returns_none() {
+        let text = "INDEX=3"; // no surrounding quotes
+        assert_eq!(parse_attr_u32(text, "INDEX"), None);
+    }
+
+    // ── parse_xml edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_xml_missing_close_image_tag() {
+        // <IMAGE ...> with no </IMAGE> → parse_xml should return empty.
+        let xml = r#"<WIM><IMAGE INDEX="1"><NAME>Orphan</NAME></WIM>"#;
+        let entries = parse_xml(xml);
+        assert!(
+            entries.is_empty(),
+            "unclosed IMAGE tag should yield no entries"
+        );
+    }
+
+    #[test]
+    fn parse_xml_image_tag_no_closing_angle_bracket() {
+        // <IMAGE with no '>' → find('>') returns None → break (line 295).
+        let xml = r#"<IMAGE INDEX="1" truncated here without end"#;
+        let entries = parse_xml(xml);
+        assert!(
+            entries.is_empty(),
+            "IMAGE tag with no '>' should yield no entries"
+        );
+    }
+
+    // ── read_header edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn read_header_too_short_returns_too_short() {
+        // A 10-byte buffer: read_exact will get UnexpectedEof.
+        let data = vec![0u8; 10];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn read_header_wrong_magic_returns_bad_magic() {
+        // Buffer is exactly HEADER_SIZE bytes but magic bytes are all zeros.
+        let data = vec![0u8; HEADER_SIZE];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::BadMagic)));
+    }
+
+    // ── detect_and_parse xml size guard ──────────────────────────────────────
+
+    #[test]
+    fn detect_and_parse_xml_original_size_exceeds_max() {
+        // Build a WIM whose xml_data.original_size is absurdly large.
+        let mut wim = build_wim(1, "<WIM></WIM>");
+        // original_size is at bytes 88..96 of the header (CBOriginal in RESHDR).
+        let huge: u64 = 128 * 1024 * 1024; // 128 MiB > MAX_XML_SIZE (64 MiB)
+        wim[88..96].copy_from_slice(&huge.to_le_bytes());
+        let mut c = Cursor::new(wim);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
     }
 }

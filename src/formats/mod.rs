@@ -58,3 +58,9 @@ pub mod dmg;
 
 #[cfg(feature = "apfs")]
 pub mod apfs;
+
+#[cfg(feature = "zip")]
+pub mod zip;
+
+#[cfg(feature = "tar")]
+pub mod tar;

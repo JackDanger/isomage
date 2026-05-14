@@ -894,4 +894,462 @@ mod tests {
         let mut c = Cursor::new(&patched);
         assert!(matches!(detect_and_parse(&mut c), Err(Error::BadVersion)));
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(
+            msg.contains("SquashFS") || msg.contains("short"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(
+            msg.contains("magic") || msg.contains("SquashFS"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_version() {
+        let msg = format!("{}", Error::BadVersion);
+        assert!(
+            msg.contains("version") || msg.contains("4.0"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_compressed() {
+        let msg = format!("{}", Error::Compressed);
+        assert!(
+            msg.contains("compress") || msg.contains("codec"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn error_display_too_deep() {
+        let msg = format!("{}", Error::TooDeep);
+        assert!(
+            msg.contains("depth") || msg.contains("deep") || msg.contains("64"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = io::Error::other("src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::TooDeep.source().is_none());
+    }
+
+    // ── parse_inode_body variants ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_inode_body_ldir() {
+        // INODE_LDIR body: nlink(u32) file_size(u32) start_block(u32) parent(u32)
+        //                  i_count(u16) offset(u16) xattr(u32) = 24 bytes
+        let mut body = vec![0u8; 24];
+        body[4..8].copy_from_slice(&99u32.to_le_bytes()); // file_size
+        body[8..12].copy_from_slice(&7u32.to_le_bytes()); // start_block
+        body[20..22].copy_from_slice(&5u16.to_le_bytes()); // offset
+        let inode = parse_inode_body(&body, INODE_LDIR, 4096).expect("LDIR parse failed");
+        assert_eq!(inode.inode_type, INODE_LDIR);
+        assert!(inode.dir_info.is_some());
+        let (start, off, size) = inode.dir_info.unwrap();
+        assert_eq!(start, 7);
+        assert_eq!(off, 5);
+        assert_eq!(size, 99);
+    }
+
+    #[test]
+    fn parse_inode_body_lreg() {
+        // INODE_LREG body (no blocks needed when fragment != 0xFFFF_FFFF):
+        // start_block(u64) file_size(u64) sparse(u64) nlink(u32) fragment(u32)
+        // offset(u32) xattr(u32) = 40 bytes
+        let mut body = vec![0u8; 40];
+        body[..8].copy_from_slice(&42u64.to_le_bytes()); // start_block
+        body[8..16].copy_from_slice(&100u64.to_le_bytes()); // file_size
+                                                            // fragment = 0 (uses fragment table) → nblocks = 100/4096 = 0 → no block_sizes
+        body[28..32].copy_from_slice(&0u32.to_le_bytes()); // fragment = 0 (used, not sentinel)
+        let inode = parse_inode_body(&body, INODE_LREG, 4096).expect("LREG parse failed");
+        assert_eq!(inode.inode_type, INODE_LREG);
+        assert!(inode.reg_info.is_some());
+        let (start, size, _, frag) = inode.reg_info.unwrap();
+        assert_eq!(start, 42);
+        assert_eq!(size, 100);
+        assert_eq!(frag, 0);
+    }
+
+    #[test]
+    fn parse_inode_body_symlink() {
+        // INODE_SYMLINK (type 3): symlink_size(u32) symlink(bytes) — but our
+        // parser ignores symlinks and returns a no-info inode.
+        let body = vec![0u8; 8]; // minimal buffer
+        let inode = parse_inode_body(&body, INODE_SYMLINK, 4096).expect("symlink parse failed");
+        assert_eq!(inode.inode_type, INODE_SYMLINK);
+        assert!(inode.dir_info.is_none());
+        assert!(inode.reg_info.is_none());
+    }
+
+    #[test]
+    fn parse_inode_body_lsymlink() {
+        let body = vec![0u8; 8];
+        let inode = parse_inode_body(&body, INODE_LSYMLINK, 4096).expect("lsymlink parse failed");
+        assert!(inode.dir_info.is_none());
+        assert!(inode.reg_info.is_none());
+    }
+
+    #[test]
+    fn parse_inode_body_unknown_type() {
+        let body = vec![0u8; 4];
+        let inode = parse_inode_body(&body, 99, 4096).expect("unknown type should not error");
+        assert!(inode.dir_info.is_none());
+        assert!(inode.reg_info.is_none());
+    }
+
+    // ── block_count_for ───────────────────────────────────────────────────────
+
+    #[test]
+    fn block_count_for_with_fragment() {
+        // When fragment != 0xFFFF_FFFF, the last partial block is in the fragment
+        // table → nblocks = file_size / block_size (not ceil).
+        let bs = 4096u32;
+        // 8000 bytes: 8000/4096 = 1 (floor); ceil would be 2.
+        assert_eq!(block_count_for(8000, bs, 0), 1);
+        // Exactly one full block: 4096/4096 = 1.
+        assert_eq!(block_count_for(4096, bs, 0), 1);
+        // Zero: 0/4096 = 0.
+        assert_eq!(block_count_for(0, bs, 0), 0);
+    }
+
+    #[test]
+    fn block_count_for_no_fragment() {
+        let bs = 4096u32;
+        // Without fragment (0xFFFF_FFFF), use ceil.
+        assert_eq!(block_count_for(8000, bs, 0xFFFF_FFFF), 2);
+        assert_eq!(block_count_for(4096, bs, 0xFFFF_FFFF), 1);
+        assert_eq!(block_count_for(1, bs, 0xFFFF_FFFF), 1);
+    }
+
+    // ── file_location_for_reg ────────────────────────────────────────────────
+
+    #[test]
+    fn file_location_for_reg_with_fragment_returns_none() {
+        // Fragment used → no file_location.
+        assert!(file_location_for_reg(100, &[0x0100_0000], 0).is_none());
+    }
+
+    #[test]
+    fn file_location_for_reg_multiple_blocks_returns_none() {
+        // Two blocks → no single contiguous location.
+        assert!(file_location_for_reg(100, &[0x0100_0010, 0x0100_0010], 0xFFFF_FFFF).is_none());
+    }
+
+    #[test]
+    fn file_location_for_reg_compressed_block_returns_none() {
+        // Bit 24 of block_sizes not set → compressed → no file_location.
+        assert!(file_location_for_reg(100, &[0x0000_0010], 0xFFFF_FFFF).is_none());
+    }
+
+    #[test]
+    fn file_location_for_reg_success() {
+        // Single uncompressed block with no fragment → returns start_block.
+        let loc = file_location_for_reg(200, &[0x0100_0020], 0xFFFF_FFFF);
+        assert_eq!(loc, Some(200));
+    }
+
+    // ── Big-endian magic bytes ────────────────────────────────────────────────
+
+    #[test]
+    fn be_magic_constant_is_byte_swap_of_le() {
+        // Verify the constants are consistent: MAGIC_BE is the byte-swap of MAGIC_LE.
+        assert_eq!(MAGIC_LE.swap_bytes(), MAGIC_BE);
+    }
+
+    // ── From<io::Error> ───────────────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io_err = io::Error::other("disk error");
+        let err: Error = Error::from(io_err);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── Superblock::read edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn detect_and_parse_too_short_returns_too_short() {
+        let mut img = vec![0u8; 10];
+        img[0..4].copy_from_slice(&MAGIC_LE.to_le_bytes());
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn detect_and_parse_bad_magic_returns_bad_magic() {
+        let img = vec![0u8; 96]; // all zeros → no valid magic
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::BadMagic)));
+    }
+
+    #[test]
+    fn detect_and_parse_block_size_zero_returns_bad_magic() {
+        let mut img = vec![0u8; 96];
+        img[0..4].copy_from_slice(&MAGIC_LE.to_le_bytes());
+        img[28..30].copy_from_slice(&4u16.to_le_bytes()); // version_major = 4
+                                                          // block_size at [12..16] stays 0 → BadMagic
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::BadMagic)));
+    }
+
+    // ── read_metadata_block compressed rejection ───────────────────────────────
+
+    #[test]
+    fn read_metadata_block_compressed_returns_error() {
+        // Header 0x0005 has bit 15 clear → compressed
+        let data = vec![0x05u8, 0x00];
+        let mut c = Cursor::new(&data);
+        assert!(matches!(
+            read_metadata_block(&mut c),
+            Err(Error::Compressed)
+        ));
+    }
+
+    #[test]
+    fn seek_to_metadata_block_compressed_in_skip_returns_error() {
+        // Block at offset 0 has compressed header (bit 15 = 0) → error while skipping
+        let data = vec![0x05u8, 0x00, 0xFF, 0xFF];
+        let mut c = Cursor::new(&data);
+        // block_count=1 means skip 1 block before reading; first block is compressed
+        assert!(matches!(
+            seek_to_metadata_block(&mut c, 0, 1),
+            Err(Error::Compressed)
+        ));
+    }
+
+    // ── read_and_parse_inode: block too short ─────────────────────────────────
+
+    #[test]
+    fn read_and_parse_inode_offset_past_block_returns_error() {
+        // Metadata block with 8 bytes of content. offset=0 → need 16 bytes → error.
+        let mut data = vec![0x08u8, 0x80]; // header: uncompressed, size=8
+        data.extend_from_slice(&[0u8; 8]); // 8-byte content (< 16 needed for common header)
+        let mut c = Cursor::new(&data);
+        let result = read_and_parse_inode(&mut c, 0, 0, 0, 4096);
+        assert!(matches!(result, Err(Error::Io(_))));
+    }
+
+    // ── parse_directory edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn parse_directory_offset_past_block_returns_error() {
+        // Block with 4 bytes of content; dir_offset=10 > 4 → UnexpectedEof.
+        let mut data = vec![0x04u8, 0x80]; // header: uncompressed, size=4
+        data.extend_from_slice(&[0u8; 4]);
+        let mut c = Cursor::new(&data);
+        let result = parse_directory(&mut c, 0, 0, 10, 100);
+        assert!(matches!(result, Err(Error::Io(_))));
+    }
+
+    #[test]
+    fn parse_directory_entry_header_truncated_breaks_loop() {
+        // Dir block: 12-byte dir-header (count=0 → 1 entry) + 4 bytes of partial entry (< 8).
+        // pos=12 after dir header; pos+8=20 > dir_bytes.len()=16 → break.
+        let mut dir_block = vec![0u8; 12]; // count=0, start_block=0, base_inode=0
+        dir_block.extend_from_slice(&[0u8; 4]); // partial entry (4 bytes, need 8)
+        let sz = dir_block.len(); // 16
+        let hdr = (sz | 0x8000) as u16;
+        let mut data = hdr.to_le_bytes().to_vec();
+        data.extend_from_slice(&dir_block);
+        let mut c = Cursor::new(&data);
+        let result = parse_directory(&mut c, 0, 0, 0, 100).unwrap();
+        assert!(
+            result.is_empty(),
+            "truncated entry header should produce no entries"
+        );
+    }
+
+    #[test]
+    fn parse_directory_name_overflow_breaks_loop() {
+        // Dir block: 12-byte dir-header + 8-byte entry with name_size=200.
+        // After reading 8-byte header, pos=20; name needs 201 bytes but dir_bytes.len()=20 → break.
+        let mut dir_block = vec![0u8; 12]; // dir header
+        dir_block.extend_from_slice(&0u16.to_le_bytes()); // offset
+        dir_block.extend_from_slice(&0i16.to_le_bytes()); // inode_offset
+        dir_block.extend_from_slice(&2u16.to_le_bytes()); // type
+        dir_block.extend_from_slice(&200u16.to_le_bytes()); // name_size=200 → need 201 bytes
+        let sz = dir_block.len(); // 20
+        let hdr = (sz | 0x8000) as u16;
+        let mut data = hdr.to_le_bytes().to_vec();
+        data.extend_from_slice(&dir_block);
+        let mut c = Cursor::new(&data);
+        let result = parse_directory(&mut c, 0, 0, 0, 100).unwrap();
+        assert!(
+            result.is_empty(),
+            "overflowing name should produce no entries"
+        );
+    }
+
+    #[test]
+    fn parse_directory_dot_dotdot_entries_skipped() {
+        // Build a directory block containing "." and ".." entries which should be skipped.
+        let make_entry = |name: &[u8]| -> Vec<u8> {
+            let mut e = Vec::new();
+            e.extend_from_slice(&0u16.to_le_bytes()); // offset
+            e.extend_from_slice(&0i16.to_le_bytes()); // inode_offset
+            e.extend_from_slice(&1u16.to_le_bytes()); // type
+            e.extend_from_slice(&((name.len() - 1) as u16).to_le_bytes()); // name_size
+            e.extend_from_slice(name);
+            e
+        };
+        let dot = make_entry(b".");
+        let dotdot = make_entry(b"..");
+        let count = 1u32; // count=1 → 2 entries (0..=1)
+        let mut dir_block = Vec::new();
+        dir_block.extend_from_slice(&count.to_le_bytes());
+        dir_block.extend_from_slice(&0u32.to_le_bytes()); // start_block
+        dir_block.extend_from_slice(&0u32.to_le_bytes()); // base_inode
+        dir_block.extend_from_slice(&dot);
+        dir_block.extend_from_slice(&dotdot);
+        let sz = dir_block.len();
+        let hdr = (sz | 0x8000) as u16;
+        let mut data = hdr.to_le_bytes().to_vec();
+        data.extend_from_slice(&dir_block);
+        let mut c = Cursor::new(&data);
+        let result = parse_directory(&mut c, 0, 0, 0, 1000).unwrap();
+        assert!(result.is_empty(), "dot and dotdot entries must be skipped");
+    }
+
+    // ── build_tree: depth limit ───────────────────────────────────────────────
+
+    #[test]
+    fn build_tree_too_deep_returns_error() {
+        let img = build_image("f.txt", b"x");
+        let mut c = Cursor::new(&img);
+        let sb = Superblock::read(&mut c).unwrap();
+        let result = build_tree(&mut c, &sb, "x".to_string(), 0, 0, MAX_DEPTH + 1);
+        assert!(matches!(result, Err(Error::TooDeep)));
+    }
+
+    // ── build_tree: REG/LREG no-location path ────────────────────────────────
+
+    #[test]
+    fn file_with_fragment_has_no_file_location() {
+        // Patch the file inode's fragment field from 0xFFFFFFFF to 0 → location = None.
+        // File inode common header starts at byte 130 in build_image layout:
+        //   superblock(96) + block_hdr(2) + root_dir_inode(32 bytes = FILE_INODE_OFFSET)
+        //   → 96 + 2 + 32 = 130. Body starts at 130 + 16 = 146. Fragment at body+4 = 150.
+        let mut img = build_image("file.txt", b"hello");
+        img[150..154].copy_from_slice(&0u32.to_le_bytes()); // fragment = 0 (not sentinel)
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).unwrap();
+        let child = &tree.children[0];
+        assert!(
+            child.file_location.is_none(),
+            "file with fragment must have no location"
+        );
+        assert_eq!(child.file_length, Some(5));
+    }
+
+    // ── build_tree: symlink and unknown inode types ───────────────────────────
+
+    #[test]
+    fn symlink_inode_returns_zero_size_file() {
+        // Patch file inode type from INODE_REG(2) to INODE_SYMLINK(3).
+        // File inode common header at byte 130 in build_image layout.
+        let mut img = build_image("link", b"target");
+        img[130..132].copy_from_slice(&INODE_SYMLINK.to_le_bytes());
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).unwrap();
+        let child = &tree.children[0];
+        assert_eq!(child.name, "link");
+        assert_eq!(child.size, 0);
+    }
+
+    #[test]
+    fn unknown_inode_type_returns_zero_size_file() {
+        // Patch file inode type to 20 → falls into catch-all → zero-size file.
+        let mut img = build_image("node", b"x");
+        img[130..132].copy_from_slice(&20u16.to_le_bytes());
+        let mut c = Cursor::new(&img);
+        let tree = detect_and_parse(&mut c).unwrap();
+        let child = &tree.children[0];
+        assert_eq!(child.size, 0);
+    }
+
+    // ── seek_to_metadata_block: uncompressed-block skip covers lines 285-287 ──
+
+    #[test]
+    fn seek_to_metadata_block_uncompressed_skip() {
+        // block_idx=1 → skip one block before reading.
+        // First block header: uncompressed (bit 15 set), size=4 → skip 4 bytes.
+        // Then the second block header + content = the actual target block.
+        let mut data: Vec<u8> = Vec::new();
+        // First (skip) block: header = size=4 | 0x8000 = 0x8004.
+        data.extend_from_slice(&0x8004u16.to_le_bytes()); // uncompressed, size=4
+        data.extend_from_slice(&[0xAAu8; 4]); // 4 bytes of skipped content
+                                              // Target block: uncompressed, size=8, content = 8 zeros.
+        data.extend_from_slice(&0x8008u16.to_le_bytes()); // uncompressed, size=8
+        data.extend_from_slice(&[0xBBu8; 8]);
+        let mut c = Cursor::new(&data);
+        // seek_to_metadata_block(r, table_start=0, block_idx=1) should skip the
+        // first block and return the content of the second block.
+        let result = seek_to_metadata_block(&mut c, 0, 1).unwrap();
+        assert_eq!(result, vec![0xBBu8; 8]);
+    }
+
+    // ── parse_inode_body: too_short path covers lines 313-317 ────────────────
+
+    #[test]
+    fn parse_inode_body_dir_too_short_returns_error() {
+        // INODE_DIR requires 16 bytes; provide only 10 → too_short(16) fires (lines 314-317).
+        let body = vec![0u8; 10];
+        let result = parse_inode_body(&body, INODE_DIR, 4096);
+        assert!(matches!(result, Err(Error::Io(_))));
+    }
+
+    // ── Big-endian magic rejected (line 216) ─────────────────────────────────
+
+    #[test]
+    fn superblock_read_big_endian_magic_returns_bad_magic() {
+        // MAGIC_BE bytes at offset 0 → recognized as BE magic but rejected
+        // by the !little_endian guard (big-endian images not supported).
+        let mut data = vec![0u8; 200];
+        data[0..4].copy_from_slice(&MAGIC_BE.to_be_bytes());
+        let mut c = Cursor::new(data);
+        let result = Superblock::read(&mut c);
+        assert!(matches!(result, Err(Error::BadMagic)));
+    }
+
+    #[test]
+    fn detect_inner_big_endian_magic_returns_ok() {
+        // detect_inner accepts both LE and BE magic — it only checks bytes 0..4.
+        let mut data = vec![0u8; 4];
+        data[0..4].copy_from_slice(&MAGIC_BE.to_be_bytes());
+        let mut c = Cursor::new(data);
+        // detect_inner accepts be magic as Ok()
+        assert!(matches!(detect_inner(&mut c), Ok(())));
+    }
 }

@@ -232,4 +232,36 @@ mod tests {
         );
         std::fs::remove_file(&path).ok();
     }
+
+    #[test]
+    fn len_and_is_empty_methods() {
+        let path = scratch_image(b"hello", "len_is_empty");
+        let img = MmapImage::open(&path).unwrap();
+        assert_eq!(img.len(), 5, "len() should return file size");
+        assert!(!img.is_empty(), "5-byte file should not be empty");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_at_end_of_file_returns_zero() {
+        let path = scratch_image(b"hi", "read_eof");
+        let mut img = MmapImage::open(&path).unwrap();
+        img.seek(SeekFrom::Start(2)).unwrap(); // seek to end
+        let mut buf = [0u8; 4];
+        let n = img.read(&mut buf).unwrap();
+        assert_eq!(n, 0, "read past end should return 0 bytes");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn seek_from_end() {
+        let path = scratch_image(b"abcde", "seek_end");
+        let mut img = MmapImage::open(&path).unwrap();
+        let pos = img.seek(SeekFrom::End(-2)).unwrap();
+        assert_eq!(pos, 3, "SeekFrom::End(-2) on 5-byte file → position 3");
+        let mut buf = [0u8; 2];
+        img.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"de");
+        std::fs::remove_file(&path).ok();
+    }
 }

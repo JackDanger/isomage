@@ -1,13 +1,34 @@
 # Working in isomage
 
 This repository is a **pure-Rust library** for reading and (as of
-v3.0) writing disc and disk images. The matrix is broader than the
-name suggests — ISO 9660 and UDF remain the centerpiece, but the
-crate is the umbrella for raw IMG / partition tables / VHD / VHDX /
-VMDK / QCOW2 / WIM / DMG / FAT / exFAT / NTFS / ext / HFS+ /
-SquashFS / APFS support. There is no CLI binary, no Homebrew tap,
-no distributed executable — the only artifact is the crate on
-crates.io and its rustdoc on docs.rs.
+v3.0) writing **disk images and filesystem formats**. It is one crate
+within the [7zippy](https://github.com/JackDanger/7zippy) project suite.
+
+## Scope: what belongs here vs. in sibling crates
+
+**In isomage — disk images and filesystems:**
+ISO 9660, UDF, FAT, exFAT, NTFS, ext2/3/4, HFS+, SquashFS, APFS,
+MBR, GPT, VHD, VMDK, QCOW2, WIM, DMG, ZIP (as container), TAR (as
+container), and any other format that *is* a disk image or *contains*
+a filesystem tree.
+
+**NOT in isomage — compression algorithms:**
+GZip, BZip2, XZ, LZMA, Deflate, 7z, and every other format whose
+primary purpose is compression rather than filesystem containment.
+These belong in sibling crates in the 7zippy suite:
+- `gzippy` (https://github.com/JackDanger/gzippy) — GZip / Deflate
+- `lazippy` (https://github.com/JackDanger/lazippy) — LZMA / XZ
+- `bzippy2` — BZip2 (7zippy sub-crate)
+- `7zippy` (https://github.com/JackDanger/7zippy) — 7z archive umbrella
+
+When in doubt about the broader 7zippy architecture, read `~/www/7zippy/README.md`
+and `~/www/7zippy/docs/ARCHITECTURE.md`.
+
+The rule in one sentence: **if it's a disk image, isomage handles it;
+if it's a compression algorithm, it goes in a sibling 7zippy crate.**
+
+There is no CLI binary, no Homebrew tap, no distributed executable —
+the only artifact is the crate on crates.io and its rustdoc on docs.rs.
 
 ## Hard rules, read first
 

@@ -10,12 +10,12 @@ exclude = ["fuzz"]
 
 [package]
 name = "isomage"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT"
 authors = ["Jack Danger <github@jackdanger.com>"]
-description = "Pure-Rust reader for ISO 9660 (Joliet, Rock Ridge) and UDF disc images. Read-only, no mount, no FUSE."
+description = "Pure-Rust reader for ISO 9660, UDF, FAT, ext2/3/4, NTFS, HFS+, SquashFS, ZIP, TAR, and more. No unsafe, no runtime deps."
 repository = "https://github.com/JackDanger/isomage"
 homepage = "https://github.com/JackDanger/isomage"
 documentation = "https://docs.rs/isomage"
@@ -68,15 +68,25 @@ ext = []
 hfsplus = []
 squashfs = []
 apfs = []
+zip = []
+tar = []
 
 # Performance opt-ins. Both gate `unsafe`; default build is safe-only.
 mmap = ["dep:memmap2"]     # memmap2 + MmapImage. Adds runtime dep when enabled.
 simd = []                   # Fast CRC (currently scalar; SIMD intrinsics planned).
 
-# Codec opt-ins. Names mirror likely crate choices; no deps wired
-# until the first format that needs them lands.
-deflate-gzippy = []   # User-named "gzippy". Crate name TBD; see prompt log.
-lzma = []
+# Codec opt-ins. isomage deliberately contains no codec implementations —
+# compression belongs in sibling 7zippy crates. These feature flags exist
+# so isomage can optionally wire in a sibling crate's library API for
+# decompressing embedded content (e.g. deflate-compressed ZIP entries).
+#
+# Sibling crates in the 7zippy suite:
+#   deflate / gzip → gzippy  (https://github.com/JackDanger/gzippy)
+#   lzma / xz      → lazippy (https://github.com/JackDanger/lazippy)
+#   bzip2          → bzippy2 (7zippy sub-crate)
+#   lz4            → (planned 7zippy sub-crate)
+deflate-gzippy = []   # gates dep on gzippy for deflate decompression
+lzma = []             # gates dep on lazippy for LZMA/XZ decompression
 zstd = []
 bzip2 = []
 lz4 = []
@@ -165,6 +175,22 @@ required-features = ["dmg"]
 [[test]]
 name = "apfs_round_trip"
 required-features = ["apfs"]
+
+[[test]]
+name = "zip_round_trip"
+required-features = ["zip"]
+
+[[test]]
+name = "zip_write_round_trip"
+required-features = ["zip", "write"]
+
+[[test]]
+name = "tar_round_trip"
+required-features = ["tar"]
+
+[[test]]
+name = "tar_write_round_trip"
+required-features = ["tar", "write"]
 
 [profile.release]
 opt-level = 2

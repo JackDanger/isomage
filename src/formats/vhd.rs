@@ -637,4 +637,128 @@ mod tests {
             "differencing VHD should return UnsupportedType(4)"
         );
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("512") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(
+            msg.contains("conectix") || msg.contains("cookie"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_checksum() {
+        let msg = format!("{}", Error::BadChecksum);
+        assert!(
+            msg.contains("checksum") || msg.contains("sum"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_unsupported_type() {
+        let msg = format!("{}", Error::UnsupportedType(5));
+        assert!(msg.contains('5'), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_dynamic_header() {
+        let msg = format!("{}", Error::BadDynamicHeader);
+        assert!(
+            msg.contains("cxsparse") || msg.contains("dynamic"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::BadChecksum.source().is_none());
+        assert!(Error::UnsupportedType(2).source().is_none());
+        assert!(Error::BadDynamicHeader.source().is_none());
+    }
+
+    #[test]
+    fn error_from_io_error() {
+        let io = io::Error::other("disk read failed");
+        let e = Error::from(io);
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn read_footer_too_short_returns_error() {
+        // 200 bytes: seek to 0 succeeds, but read_exact(512) gets UnexpectedEof → TooShort.
+        let data = vec![0u8; 200];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_footer(&mut c, 0), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn read_footer_bad_magic_returns_error() {
+        // 512 bytes of zeros: cookie is all-zeros, not b"conectix" → BadMagic.
+        let data = vec![0u8; 512];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_footer(&mut c, 0), Err(Error::BadMagic)));
+    }
+
+    #[test]
+    fn parse_fixed_current_size_exceeds_data_region_returns_error() {
+        // current_size=1000 on a 512-byte file: data_region = 512 - 512 = 0; 1000 > 0 → TooShort.
+        let footer = build_footer(DISK_TYPE_FIXED, 1000, 0xFFFF_FFFF_FFFF_FFFFu64);
+        let mut img = vec![0u8; 0];
+        img.extend_from_slice(&footer);
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn parse_dynamic_data_offset_too_large_returns_error() {
+        // Build dynamic footer with data_offset = 0xFFFF_FFFF_FFFF_FFFF (Fixed sentinel) —
+        // dyn_header_offset = 0xFFFF_FFFF_FFFF_FFFF, which exceeds file_len - 1024 → TooShort.
+        let footer = build_footer(DISK_TYPE_DYNAMIC, 1024 * 1024, 0xFFFF_FFFF_FFFF_FFFFu64);
+        let mut img = vec![0u8; 512];
+        img.extend_from_slice(&footer);
+        let mut c = Cursor::new(&img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn parse_dynamic_bad_dyn_header_cookie_returns_error() {
+        // Valid dynamic footer at data_offset=512, but dyn header is all-zeros (wrong cookie).
+        let footer = build_footer(DISK_TYPE_DYNAMIC, 1024 * 1024, 512);
+        let dyn_hdr = [0u8; 1024]; // wrong cookie: not b"cxsparse"
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&footer); // copy at byte 0
+        img.extend_from_slice(&dyn_hdr); // dyn header at 512
+        img.extend_from_slice(&footer); // authoritative footer at end
+        let mut c = Cursor::new(&img);
+        assert!(matches!(
+            detect_and_parse(&mut c),
+            Err(Error::BadDynamicHeader)
+        ));
+    }
 }

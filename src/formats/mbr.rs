@@ -266,4 +266,79 @@ mod tests {
         assert_eq!(root.children[0].size, 1024 * 512);
         assert_eq!(root.children[0].file_location, Some(2048 * 512));
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("512") || msg.contains("short"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_signature() {
+        let msg = format!("{}", Error::BadSignature);
+        assert!(
+            msg.contains("55AA") || msg.contains("signature"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_protective_mbr() {
+        let msg = format!("{}", Error::ProtectiveMbr);
+        assert!(
+            msg.contains("GPT") || msg.contains("protective"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::other("disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(std::io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadSignature.source().is_none());
+        assert!(Error::ProtectiveMbr.source().is_none());
+    }
+
+    #[test]
+    fn error_from_io_error() {
+        let e = Error::from(std::io::Error::other("mbr test"));
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn parse_sector_too_short_returns_error() {
+        let short = vec![0u8; 100];
+        assert!(matches!(parse_sector(&short), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn to_tree_zero_length_partition_has_no_location() {
+        let parts = vec![Partition {
+            index: 0,
+            status: 0,
+            type_code: 0x83,
+            start: 512,
+            length: 0, // zero-length → file_location = None
+        }];
+        let tree = to_tree(&parts);
+        assert!(
+            tree.children[0].file_location.is_none(),
+            "zero-length partition should have file_location=None"
+        );
+    }
 }

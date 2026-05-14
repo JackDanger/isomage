@@ -4,6 +4,75 @@ All notable changes to `isomage` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-05-13
+
+### Added
+
+**15+ new format readers** — all additive, all gated behind per-format Cargo
+features:
+
+| Feature | Format | Notes |
+|---------|--------|-------|
+| `fat` | FAT12/16/32 | LFN, root-dir, cluster chains |
+| `ext` | ext2/3/4 | Extent tree, classical pointers, double- and triple-indirect |
+| `ntfs` | NTFS | MFT records, run-list, fixup |
+| `hfsplus` | HFS+ / HFSX | B-tree catalog, file extents |
+| `squashfs` | SquashFS 4.x | Metadata block parsing, inode types |
+| `vhd` | VHD Fixed + Dynamic | Footer checksum validation |
+| `vmdk` | VMDK sparse | Grain descriptor parsing |
+| `qcow2` | QCOW2 v2/v3 | L1/L2 table stubs, disk size |
+| `wim` | WIM | XML image catalog, UTF-16 LE |
+| `dmg` | DMG | KOLY footer, plist partition table |
+| `apfs` | APFS | NX superblock, volume list |
+| `gpt` | GPT | Protective MBR + GPT header parsing |
+| `zip` | ZIP / ZIP64 | Central directory, stored files |
+| `tar` | TAR ustar/GNU | Long-name, long-link, PAX headers |
+
+**Write APIs** (behind `--features write`):
+
+- `zip::write_stored` — STORED (uncompressed) ZIP archives. CRC-32 via
+  `const fn` lookup table; LFH + CDR + EOCD in one pass.
+- `tar::write` — POSIX ustar archives. Octal field encoding, correct
+  checksum (space-fill then sum), two EOA blocks.
+
+**Generic entry points** (behind `--all-features` or per-format feature):
+
+- Each format module exposes `detect(r)` and `detect_and_parse(r)` with
+  the same signature as the existing `iso9660` / `udf` functions.
+- `detect_and_parse_filesystem` auto-detects all enabled formats.
+
+**Performance** — sequential-read benchmark on 60 MB ISO, 30 MB TAR, 30 MB
+stored ZIP shows isomage **3–6× faster** than `7zz`:
+
+| Format | isomage | 7zz | Speedup |
+|--------|---------|-----|---------|
+| ISO 9660 | 9.6 GiB/s | 2.7 GiB/s | **3.5×** |
+| TAR | 11.7 GiB/s | 2.4 GiB/s | **4.8×** |
+| ZIP stored | 10.7 GiB/s | 1.7 GiB/s | **6.1×** |
+
+**Test coverage** — unit tests added for all new format readers;
+overall line coverage improved from ~56% at v2.0.0 to **84.8%**:
+
+- `iso9660.rs` 90% · `udf.rs` 77% · `hfsplus.rs` 80% · `ext.rs` 84%
+- `tar.rs` 92% · `zip.rs` 85%
+
+### Fixed
+
+- **HFS+ `build_tree` orphaned files in subdirectories**: files whose parent
+  directory was removed from the flat `HashMap` before the file-attachment
+  pass were silently dropped from the tree. Fixed via `cnid_path()` +
+  `find_by_path_mut()` recursive traversal.
+- **UDF AVDP search**: the parser now scans multiple candidate sectors
+  (256, last, last-256, and a compact fallback sweep 32..256) instead of
+  requiring the AVDP to be exactly at sector 256. Fixes detection of
+  `hdiutil compact` images that place the AVDP at sector 64.
+
+### Changed — internal
+
+- `tar::scan_entries` strips leading `./` from all entry names (idiomatic
+  in `tar -C $DIR -cf archive .` output) rather than requiring callers to
+  strip it manually.
+
 ## [2.0.0] — 2026-05-12
 
 ### Repositioning
@@ -125,6 +194,7 @@ This is the last release that included a CLI binary distribution.
 
 Pre-1.0 release. See git log for details.
 
+[2.1.0]: https://github.com/JackDanger/isomage/releases/tag/v2.1.0
 [2.0.0]: https://github.com/JackDanger/isomage/releases/tag/v2.0.0
 [1.0.0]: https://github.com/JackDanger/isomage/releases/tag/v1.0.0
 [0.4.0]: https://github.com/JackDanger/isomage/releases/tag/v0.4.0

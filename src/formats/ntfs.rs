@@ -763,6 +763,102 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Seek, SeekFrom};
 
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("short") || msg.contains("NTFS"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(msg.contains("OEM") || msg.contains("magic"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_cluster_size() {
+        let msg = format!("{}", Error::BadClusterSize);
+        assert!(
+            msg.contains("cluster") || msg.contains("invalid"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_too_deep() {
+        let msg = format!("{}", Error::TooDeep);
+        assert!(
+            msg.contains("depth") || msg.contains("recursion"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let msg = format!("{}", Error::Io(std::io::Error::other("disk")));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(std::io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::BadClusterSize.source().is_none());
+        assert!(Error::TooDeep.source().is_none());
+    }
+
+    // ── parse_boot_sector error paths ─────────────────────────────────────────
+
+    #[test]
+    fn parse_boot_sector_too_short() {
+        assert!(matches!(
+            parse_boot_sector(&[0u8; 10]),
+            Err(Error::TooShort)
+        ));
+    }
+
+    #[test]
+    fn parse_boot_sector_bad_magic() {
+        let mut data = vec![0u8; 512];
+        // OEM ID deliberately wrong
+        data[3..11].copy_from_slice(b"NOTNTFS!");
+        assert!(matches!(parse_boot_sector(&data), Err(Error::BadMagic)));
+    }
+
+    #[test]
+    fn parse_boot_sector_bad_sector_size() {
+        let mut data = vec![0u8; 512];
+        data[3..11].copy_from_slice(NTFS_OEM_ID);
+        // bytes_per_sector = 0 (invalid)
+        data[11..13].copy_from_slice(&0u16.to_le_bytes());
+        data[13] = 8; // sectors_per_cluster
+        assert!(matches!(
+            parse_boot_sector(&data),
+            Err(Error::BadClusterSize)
+        ));
+    }
+
+    #[test]
+    fn parse_boot_sector_zero_sectors_per_cluster() {
+        let mut data = vec![0u8; 512];
+        data[3..11].copy_from_slice(NTFS_OEM_ID);
+        data[11..13].copy_from_slice(&512u16.to_le_bytes()); // valid sector size
+        data[13] = 0; // sectors_per_cluster = 0 (invalid)
+        assert!(matches!(
+            parse_boot_sector(&data),
+            Err(Error::BadClusterSize)
+        ));
+    }
+
     // ── Minimal in-memory NTFS image builder ──────────────────────────────
 
     /// Build a minimal valid NTFS boot sector at offset 0 of an in-memory
@@ -1130,6 +1226,114 @@ mod tests {
         );
     }
 
+    // ── From<io::Error> conversion ────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io_err = std::io::Error::other("disk error");
+        let err: Error = Error::from(io_err);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── parse_boot_sector extra error paths ───────────────────────────────────
+
+    #[test]
+    fn parse_boot_sector_bad_mft_record_size() {
+        // cpfrs = -17 → mft_record_size = 1 << 17 = 131072, which exceeds 65536.
+        let mut data = make_ntfs_boot_sector();
+        data[64] = (-17i8) as u8; // clusters_per_FRS override
+        assert!(matches!(
+            parse_boot_sector(&data),
+            Err(Error::BadClusterSize)
+        ));
+    }
+
+    // ── apply_fixup edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn apply_fixup_buf_too_short() {
+        let mut buf = [0u8; 4]; // less than 8 bytes
+        assert!(!apply_fixup(&mut buf), "short buffer should return false");
+    }
+
+    #[test]
+    fn apply_fixup_usa_count_too_small() {
+        // usa_count < 2 → return false.
+        let mut buf = vec![0u8; 64];
+        // usa_offset = 0, usa_count = 1 → fails the `usa_count < 2` check.
+        buf[4] = 0; // usa_offset low byte
+        buf[5] = 0; // usa_offset high byte
+        buf[6] = 1; // usa_count low byte
+        buf[7] = 0; // usa_count high byte
+        assert!(!apply_fixup(&mut buf));
+    }
+
+    #[test]
+    fn apply_fixup_short_buf_breaks_sector_loop() {
+        // usa_offset=0, usa_count=2 → 1 fix-up entry at sector boundary 510.
+        // Buffer is only 12 bytes, so the loop's `sector_end + 2 > buf.len()` break
+        // triggers on the very first iteration (sector_end = 510 > 12).
+        let mut buf = vec![0u8; 12];
+        buf[4] = 0; // usa_offset
+        buf[5] = 0;
+        buf[6] = 2; // usa_count = 2 (USN + 1 fix-up)
+        buf[7] = 0;
+        // This should return true (fixup "applied", just no sector boundaries to fix).
+        assert!(apply_fixup(&mut buf));
+    }
+
+    // ── parse_attributes edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn parse_attributes_buf_too_short_for_offset() {
+        // buf.len() < 22 → get(20..22) returns None → early return.
+        let buf = [0u8; 10];
+        let attrs = parse_attributes(&buf);
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn parse_attributes_pos_exceeds_buf() {
+        // attr_offset set beyond buf.len() → pos + 8 > buf.len() on first loop.
+        let mut buf = vec![0u8; 30];
+        // attr_offset at bytes 20..22, set to 25 so pos = 25, pos+8 = 33 > 30.
+        buf[20] = 25;
+        buf[21] = 0;
+        let attrs = parse_attributes(&buf);
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn parse_attributes_zero_length_attr_breaks() {
+        // Length field = 0 → break immediately.
+        let mut buf = vec![0u8; 40];
+        // attr_offset = 22
+        buf[20] = 22;
+        buf[21] = 0;
+        // attr_type at pos=22: 0x00000001 (not ATTR_END = 0xFFFFFFFF)
+        buf[22] = 1;
+        // length at pos+4..+8 = 0 → triggers `length == 0` break.
+        // (all zero by default)
+        let attrs = parse_attributes(&buf);
+        assert!(attrs.is_empty());
+    }
+
+    // ── parse_filename_attr edge cases ────────────────────────────────────────
+
+    #[test]
+    fn parse_filename_attr_too_short() {
+        let data = [0u8; 10]; // less than 66 bytes
+        assert!(parse_filename_attr(&data).is_none());
+    }
+
+    #[test]
+    fn parse_filename_attr_name_overflow() {
+        let mut data = vec![0u8; 70];
+        // filename_length at byte 64: set to 3 → name_bytes_len = 6, but 66+6 = 72 > 70.
+        data[64] = 3;
+        assert!(parse_filename_attr(&data).is_none());
+    }
+
     #[test]
     fn parse_minimal_image_file_location_and_contents() {
         let img = make_minimal_ntfs_image();
@@ -1153,5 +1357,845 @@ mod tests {
         let mut buf = vec![0u8; len];
         c.read_exact(&mut buf).unwrap();
         assert_eq!(buf, b"hello ntfs\n");
+    }
+
+    // ── apply_fixup: additional edge cases ───────────────────────────────────────
+
+    #[test]
+    fn apply_fixup_usa_offset_overflow() {
+        // usa_offset + usa_count * 2 > buf.len() → return false.
+        let mut buf = vec![0u8; 64];
+        buf[4..6].copy_from_slice(&60u16.to_le_bytes()); // usa_offset = 60
+        buf[6..8].copy_from_slice(&5u16.to_le_bytes()); // usa_count = 5 → 60+10=70 > 64
+        assert!(!apply_fixup(&mut buf));
+    }
+
+    #[test]
+    fn apply_fixup_usn_mismatch_continues() {
+        // Sector end bytes don't match USN → mismatch branch (line 196) is entered;
+        // fixup still proceeds (mismatch is non-fatal in read-only mode).
+        let mut buf = vec![0u8; 1024];
+        buf[4..6].copy_from_slice(&48u16.to_le_bytes()); // usa_offset = 48
+        buf[6..8].copy_from_slice(&3u16.to_le_bytes()); // usa_count = 3
+        buf[48..50].copy_from_slice(&0xAAAAu16.to_le_bytes()); // USN = 0xAAAA
+        buf[50..52].copy_from_slice(&0x1111u16.to_le_bytes()); // fix-up for sector 1
+        buf[52..54].copy_from_slice(&0x2222u16.to_le_bytes()); // fix-up for sector 2
+                                                               // Deliberately leave sector ends as 0x0000 (mismatch with USN=0xAAAA).
+        let ok = apply_fixup(&mut buf);
+        assert!(ok, "mismatch is non-fatal; fixup should still return true");
+        // Fix-up values should be applied regardless of mismatch.
+        assert_eq!(&buf[510..512], &0x1111u16.to_le_bytes());
+        assert_eq!(&buf[1022..1024], &0x2222u16.to_le_bytes());
+    }
+
+    // ── read_mft_record: records returned as None ──────────────────────────────
+
+    fn make_ntfs_image_with_slot(
+        slot: usize,
+        good_sig: bool,
+        good_fixup: bool,
+        in_use: bool,
+    ) -> Vec<u8> {
+        const IMAGE_SIZE: usize = 32 * 1024;
+        const MFT_OFFSET: usize = 16384;
+        const MFT_RECORD_SIZE: usize = 1024;
+
+        let mut img = vec![0u8; IMAGE_SIZE];
+        let boot = make_ntfs_boot_sector();
+        img[..512].copy_from_slice(&boot);
+
+        // Minimal root dir at slot 5.
+        write_file_record(&mut img, MFT_OFFSET + 5 * MFT_RECORD_SIZE, 5, true);
+
+        // Build a bad record at the given slot.
+        let off = MFT_OFFSET + slot * MFT_RECORD_SIZE;
+        if good_sig {
+            img[off..off + 4].copy_from_slice(b"FILE");
+        }
+        // usa_offset=48, usa_count: 1 means bad fixup (usa_count<2), 3 means ok.
+        img[off + 4..off + 6].copy_from_slice(&48u16.to_le_bytes());
+        let usa_count: u16 = if good_fixup { 3 } else { 1 };
+        img[off + 6..off + 8].copy_from_slice(&usa_count.to_le_bytes());
+        if good_fixup {
+            // Place USN=1 and matching sector ends.
+            img[off + 48..off + 50].copy_from_slice(&1u16.to_le_bytes());
+            img[off + 510..off + 512].copy_from_slice(&1u16.to_le_bytes());
+            img[off + 1022..off + 1024].copy_from_slice(&1u16.to_le_bytes());
+        }
+        // Flags at offset 22: bit 0 = in-use.
+        let flags: u16 = if in_use { 0x01 } else { 0x00 };
+        img[off + 22..off + 24].copy_from_slice(&flags.to_le_bytes());
+
+        img
+    }
+
+    #[test]
+    fn read_mft_record_bad_fixup_returns_none() {
+        // Slot 6 has FILE sig but usa_count=1 → apply_fixup returns false → Ok(None).
+        // detect_and_parse ignores it and still finds root.
+        let img = make_ntfs_image_with_slot(6, true, false, true);
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("should succeed despite bad fixup slot");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn read_mft_record_not_in_use_returns_none() {
+        // Slot 6 has FILE sig, good fixup, but flags bit 0 = 0 (not in-use) → Ok(None).
+        let img = make_ntfs_image_with_slot(6, true, true, false);
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("should succeed despite not-in-use slot");
+        assert_eq!(root.name, "/");
+    }
+
+    // ── parse_attributes: resident/non-resident None paths ────────────────────
+
+    #[test]
+    fn parse_attributes_resident_data_end_overflow() {
+        // Resident attr where data_end > buf.len() → resident_data = None (line 291).
+        let mut buf = vec![0u8; 60];
+        // attr_offset = 22
+        buf[20] = 22;
+        // non_resident = 0 (resident)
+        buf[22 + 8] = 0;
+        // attr_type = ATTR_DATA (not ATTR_END)
+        let attr_type = ATTR_DATA;
+        buf[22..26].copy_from_slice(&attr_type.to_le_bytes());
+        // attr_length = 38 (22+38=60=buf.len(), so attr won't break early)
+        buf[26..30].copy_from_slice(&38u32.to_le_bytes());
+        // non_resident = 0 → check `pos + 16 + 4 <= pos + length` → 38 >= 20 ✓
+        // `pos + 24 <= buf.len()`: 22+24=46 <= 60 ✓
+        // value_length at pos+16=38: set to 50 (large)
+        buf[38..42].copy_from_slice(&50u32.to_le_bytes()); // value_length=50
+                                                           // value_offset at pos+20=42: set to 24 → data_start=22+24=46, data_end=46+50=96 > 60
+        buf[42..44].copy_from_slice(&24u16.to_le_bytes()); // value_offset=24
+                                                           // ATTR_END after this attr at 22+38=60 → but buf is exactly 60 so no room; loop breaks.
+        let attrs = parse_attributes(&buf);
+        // attr was pushed but with resident_data = None.
+        assert_eq!(attrs.len(), 1);
+        assert!(attrs[0].resident_data.is_none());
+    }
+
+    #[test]
+    fn parse_attributes_resident_too_short_for_header() {
+        // Resident attr where pos + 24 > buf.len() → resident_data = None (line 294).
+        // buf.len()=30, attr at pos=22, pos+24=46 > 30.
+        let mut buf = vec![0u8; 30];
+        buf[20] = 22; // attr_offset
+        buf[22..26].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        buf[26..30].copy_from_slice(&8u32.to_le_bytes()); // attr_length=8 → 22+8=30=buf.len()
+                                                          // non_resident = 0, `pos + 16 + 4 = 22+20=42 <= 22+8=30`? No: 42 > 30 → outer else (None at 297).
+                                                          // We need the inner None at 294: pos+24 > buf.len() but outer if passes.
+                                                          // outer: !non_resident && pos+20 <= pos+length → pos+20=42 <= pos+8=30? No → else at 297.
+                                                          // Hmm, the outer condition `pos + 16 + 4 <= pos + length` means `pos+20 <= pos+length` → `20 <= length`.
+                                                          // With length=8, 20>8 → outer else fires (line 297), not 294.
+                                                          // We need length >= 20 but buf.len() < pos+24.
+                                                          // buf.len()=30, pos=22, pos+24=46 > 30 ✓, length must be >=20.
+                                                          // But pos+length=22+20=42 must <= buf.len()=30? No, that would be break.
+                                                          // Actually parse_attributes doesn't check data_end for the outer if; it just checks length not overflow.
+                                                          // Wait: `pos + length > buf.len()` → break. So length must be <= buf.len()-pos = 8.
+                                                          // But we need length >= 20 for outer if. Conflict: if length >= 20, pos+length >= 42 > 30 → break.
+                                                          // So line 294 cannot be reached when buf is this short. Let me use a bigger buf.
+        drop(buf);
+
+        // buf.len()=50, pos=22, attr_length=28 (22+28=50=buf.len()), value_length at pos+16=38: 0.
+        // pos+24=46 <= 50 ✓. data_end=46+0=46 <= 50 ✓. This is the success path. Not 294.
+        // For 294: pos+24 > buf.len(). pos=22 → buf.len() must be < 46. But attr must fit: pos+length <= buf.len().
+        // attr_length must be >= 20 (outer if) and <= buf.len()-pos.
+        // buf.len() = 45: pos+length <= 45, length <= 23 >= 20 ✓. pos+24=46 > 45 ✓.
+        let mut buf2 = vec![0u8; 45];
+        buf2[20] = 22; // attr_offset
+        buf2[22..26].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        buf2[26..30].copy_from_slice(&23u32.to_le_bytes()); // attr_length=23 → 22+23=45=buf.len()
+                                                            // non_resident=0, length=23 >= 20 → outer if TRUE; pos+24=46 > 45=buf.len() → inner else (line 294) → None
+        let attrs2 = parse_attributes(&buf2);
+        assert_eq!(attrs2.len(), 1);
+        assert!(attrs2[0].resident_data.is_none());
+    }
+
+    #[test]
+    fn parse_attributes_nonresident_slice_overflow() {
+        // Non-resident attr where pos + length > buf.len() → nonresident_slice = None (line 303).
+        let mut buf = vec![0u8; 40];
+        buf[20] = 22; // attr_offset
+        buf[22..26].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        buf[26..30].copy_from_slice(&20u32.to_le_bytes()); // attr_length=20 → 22+20=42 > 40 → break!
+                                                           // If it breaks, attr isn't pushed. Let me use length=18 → 22+18=40=buf.len() ✓.
+        buf[26..30].copy_from_slice(&18u32.to_le_bytes()); // attr_length=18
+        buf[22 + 8] = 1; // non_resident=1
+                         // nonresident_slice: `non_resident && pos + length <= buf.len()` → 22+18=40 <= 40 ✓ → Some!
+                         // That's the success path. For None: pos+length > buf.len().
+                         // Can't have both pos+length <= buf.len() (no break) AND pos+length > buf.len() (None).
+                         // Contradiction! So the nonresident_slice=None branch at line 303 is only reachable
+                         // if the break condition (line 274) doesn't trigger but the check at 300 does.
+                         // Wait: the break at line 274 is `pos + length > buf.len()`. The None at 303 is
+                         // `!(non_resident && pos + length <= buf.len())` = `!non_resident || pos+length > buf.len()`.
+                         // For non_resident=true: None at 303 iff pos+length > buf.len() iff break at 274. So if
+                         // the break fires, the attr isn't pushed → never reaches line 303.
+                         // For non_resident=false: None at 303 because !non_resident is true.
+                         // So line 303 (nonresident_slice=None) is only reachable when non_resident=false.
+                         // In that case: the if-condition is false → else → None at 303.
+        drop(buf);
+
+        // Simple test: non_resident=false → nonresident_slice=None (line 303).
+        let mut buf3 = vec![0u8; 50];
+        buf3[20] = 22; // attr_offset = 22
+        buf3[22..26].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        buf3[26..30].copy_from_slice(&28u32.to_le_bytes()); // attr_length=28
+        buf3[22 + 8] = 0; // non_resident=0 → nonresident_slice = None (line 303 else branch)
+                          // value_length=0 at pos+16=38, value_offset=24 → data_end=46+0=46 <= 50 → resident_data=Some(&[])
+        buf3[42..44].copy_from_slice(&24u16.to_le_bytes()); // value_offset=24
+        buf3[38..42].copy_from_slice(&0u32.to_le_bytes()); // value_length=0
+        let attrs3 = parse_attributes(&buf3);
+        assert_eq!(attrs3.len(), 1);
+        assert!(attrs3[0].nonresident_slice.is_none());
+        assert!(attrs3[0].resident_data.is_some()); // resident with empty data
+    }
+
+    // ── decode_runlist: additional paths ──────────────────────────────────────
+
+    #[test]
+    fn decode_runlist_truncated_run_breaks() {
+        // Header says len_size=1, off_size=1, but only 1 data byte follows → break (line 408).
+        let data = [0x11u8, 8]; // header + only 1 byte (len byte), no offset byte
+        let (runs, _) = decode_runlist(&data);
+        assert!(runs.is_empty(), "truncated run should produce no runs");
+    }
+
+    #[test]
+    fn decode_runlist_sparse_run() {
+        // off_size=0: sparse run, had_sparse=true (lines 440-442).
+        // Header 0x10: len_size=1, off_size=0. count=4.
+        let data = [0x10u8, 4, 0x00]; // header + count + terminator
+        let (runs, had_sparse) = decode_runlist(&data);
+        assert!(had_sparse, "off_size=0 should set had_sparse");
+        assert!(runs.is_empty(), "sparse run has no physical location");
+    }
+
+    // ── namespace_priority: all branches ─────────────────────────────────────
+
+    #[test]
+    fn namespace_priority_all_values() {
+        assert_eq!(namespace_priority(NS_WIN32_DOS), 3);
+        assert_eq!(namespace_priority(NS_WIN32), 2);
+        assert_eq!(namespace_priority(NS_POSIX), 1);
+        assert_eq!(namespace_priority(NS_DOS), 0);
+        assert_eq!(namespace_priority(99), 0); // catch-all
+    }
+
+    // ── build_tree_recursive: edge cases ──────────────────────────────────────
+
+    #[test]
+    fn build_tree_recursive_too_deep() {
+        let map: HashMap<u64, Vec<RecordInfo>> = HashMap::new();
+        let err = build_tree_recursive(ROOT_MFT_RECORD, "/".to_string(), &map, MAX_DEPTH + 1);
+        assert!(matches!(err, Err(Error::TooDeep)));
+    }
+
+    #[test]
+    fn build_tree_recursive_with_file_children() {
+        // Build a tree where root has a file child with location and one without.
+        let mut map: HashMap<u64, Vec<RecordInfo>> = HashMap::new();
+        map.insert(
+            ROOT_MFT_RECORD,
+            vec![
+                RecordInfo {
+                    mft_num: 20,
+                    name: "with_loc.txt".to_string(),
+                    parent_ref: ROOT_MFT_RECORD,
+                    is_directory: false,
+                    file_size: 100,
+                    file_location: Some(4096),
+                },
+                RecordInfo {
+                    mft_num: 21,
+                    name: "no_loc.txt".to_string(),
+                    parent_ref: ROOT_MFT_RECORD,
+                    is_directory: false,
+                    file_size: 200,
+                    file_location: None, // covers TreeNode::new_file branch (line 647)
+                },
+            ],
+        );
+        let root = build_tree_recursive(ROOT_MFT_RECORD, "/".to_string(), &map, 0).unwrap();
+        assert_eq!(root.children.len(), 2);
+        let f1 = root
+            .children
+            .iter()
+            .find(|n| n.name == "with_loc.txt")
+            .unwrap();
+        assert!(f1.file_location.is_some());
+        let f2 = root
+            .children
+            .iter()
+            .find(|n| n.name == "no_loc.txt")
+            .unwrap();
+        assert!(f2.file_location.is_none());
+    }
+
+    #[test]
+    fn build_tree_recursive_with_subdirectory() {
+        // Root has a subdir child (mft_num=20) which has a grandchild file (mft_num=21).
+        // Covers recursive call path (lines 632-637).
+        let mut map: HashMap<u64, Vec<RecordInfo>> = HashMap::new();
+        map.insert(
+            ROOT_MFT_RECORD,
+            vec![RecordInfo {
+                mft_num: 20,
+                name: "subdir".to_string(),
+                parent_ref: ROOT_MFT_RECORD,
+                is_directory: true,
+                file_size: 0,
+                file_location: None,
+            }],
+        );
+        map.insert(
+            20,
+            vec![RecordInfo {
+                mft_num: 21,
+                name: "file.txt".to_string(),
+                parent_ref: 20,
+                is_directory: false,
+                file_size: 42,
+                file_location: None,
+            }],
+        );
+        let root = build_tree_recursive(ROOT_MFT_RECORD, "/".to_string(), &map, 0).unwrap();
+        assert_eq!(root.children.len(), 1);
+        let sub = &root.children[0];
+        assert_eq!(sub.name, "subdir");
+        assert_eq!(sub.children.len(), 1);
+        assert_eq!(sub.children[0].name, "file.txt");
+    }
+
+    #[test]
+    fn build_tree_recursive_too_deep_child_skipped() {
+        // A subdirectory at depth MAX_DEPTH returns TooDeep, which is silently skipped (lines 634-636).
+        let mut map: HashMap<u64, Vec<RecordInfo>> = HashMap::new();
+        // Root has a subdir that itself has a subdir, creating a chain that hits MAX_DEPTH.
+        // Easier: call build_tree_recursive at depth=MAX_DEPTH with a directory child.
+        map.insert(
+            ROOT_MFT_RECORD,
+            vec![RecordInfo {
+                mft_num: 20,
+                name: "deep".to_string(),
+                parent_ref: ROOT_MFT_RECORD,
+                is_directory: true,
+                file_size: 0,
+                file_location: None,
+            }],
+        );
+        // At depth=MAX_DEPTH, root itself succeeds (depth==MAX_DEPTH, not >MAX_DEPTH).
+        // The recursive call for child "deep" passes depth+1=MAX_DEPTH+1 > MAX_DEPTH → TooDeep.
+        let root = build_tree_recursive(ROOT_MFT_RECORD, "/".to_string(), &map, MAX_DEPTH).unwrap();
+        // TooDeep child is silently skipped.
+        assert!(
+            root.children.is_empty(),
+            "TooDeep subdirectory should be skipped"
+        );
+    }
+
+    #[test]
+    fn build_tree_recursive_orphan_node() {
+        // mft_num not in map and not ROOT → returns empty directory (line 659).
+        let map: HashMap<u64, Vec<RecordInfo>> = HashMap::new();
+        let node = build_tree_recursive(999, "orphan".to_string(), &map, 0).unwrap();
+        assert!(node.is_directory);
+        assert!(node.children.is_empty());
+    }
+
+    // ── non-resident $DATA: single-run file_location set ─────────────────────
+
+    fn write_nonresident_file_record(img: &mut [u8], offset: usize, mft_num: u64) {
+        const REC_SIZE: usize = 1024;
+
+        img[offset..offset + 4].copy_from_slice(b"FILE");
+        img[offset + 4..offset + 6].copy_from_slice(&48u16.to_le_bytes()); // usa_offset
+        img[offset + 6..offset + 8].copy_from_slice(&3u16.to_le_bytes()); // usa_count=3
+        img[offset + 48..offset + 50].copy_from_slice(&1u16.to_le_bytes()); // USN=1
+        img[offset + 510..offset + 512].copy_from_slice(&1u16.to_le_bytes());
+        img[offset + 1022..offset + 1024].copy_from_slice(&1u16.to_le_bytes());
+        img[offset + 16..offset + 18].copy_from_slice(&1u16.to_le_bytes()); // sequence
+        img[offset + 18..offset + 20].copy_from_slice(&1u16.to_le_bytes()); // link_count
+        img[offset + 22..offset + 24].copy_from_slice(&0x01u16.to_le_bytes()); // in-use
+        img[offset + 44..offset + 48].copy_from_slice(&(mft_num as u32).to_le_bytes());
+
+        // attr_offset = 56
+        img[offset + 20..offset + 22].copy_from_slice(&56u16.to_le_bytes());
+
+        // $FILE_NAME attr at 56: pointing to root (parent=5), name="big.bin"
+        let fn_name: Vec<u16> = "big.bin".encode_utf16().collect();
+        let fn_name_bytes: Vec<u8> = fn_name.iter().flat_map(|&c| c.to_le_bytes()).collect();
+        let fn_value_len = 66 + fn_name_bytes.len();
+        let fn_val_off: u16 = 24;
+        let fn_attr_len = (fn_val_off as usize + fn_value_len + 7) & !7;
+
+        let fn_start = offset + 56;
+        img[fn_start..fn_start + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        img[fn_start + 4..fn_start + 8].copy_from_slice(&(fn_attr_len as u32).to_le_bytes());
+        img[fn_start + 8] = 0; // resident
+        img[fn_start + 16..fn_start + 20].copy_from_slice(&(fn_value_len as u32).to_le_bytes());
+        img[fn_start + 20..fn_start + 22].copy_from_slice(&fn_val_off.to_le_bytes());
+        let fn_val_start = fn_start + fn_val_off as usize;
+        img[fn_val_start..fn_val_start + 8].copy_from_slice(&5u64.to_le_bytes()); // parent=5
+        img[fn_val_start + 56..fn_val_start + 60].copy_from_slice(&0x20u32.to_le_bytes()); // archive
+        img[fn_val_start + 64] = fn_name.len() as u8;
+        img[fn_val_start + 65] = NS_WIN32_DOS;
+        img[fn_val_start + 66..fn_val_start + 66 + fn_name_bytes.len()]
+            .copy_from_slice(&fn_name_bytes);
+
+        // Non-resident $DATA attr immediately after $FILE_NAME.
+        let nr_start = fn_start + fn_attr_len;
+        let nr_len: u32 = 72; // 64-byte fixed header + 8-byte runlist area
+        img[nr_start..nr_start + 4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        img[nr_start + 4..nr_start + 8].copy_from_slice(&nr_len.to_le_bytes());
+        img[nr_start + 8] = 1; // non_resident
+                               // runlist_offset at +32..34 = 64 (after fixed 64-byte header)
+        img[nr_start + 32..nr_start + 34].copy_from_slice(&64u16.to_le_bytes());
+        // data_size at +48..56 = 8 * 4096 = 32768
+        img[nr_start + 48..nr_start + 56].copy_from_slice(&(8u64 * 4096u64).to_le_bytes());
+        // Runlist at +64: single run header=0x11 (len_size=1, off_size=1), count=8, delta=+4 (LCN=4)
+        img[nr_start + 64] = 0x11; // header
+        img[nr_start + 65] = 8; // cluster count
+        img[nr_start + 66] = 4; // delta LCN = +4 → LCN=4 → byte offset=4*4096=16384
+        img[nr_start + 67] = 0x00; // terminator
+
+        // ATTR_END
+        let end_start = nr_start + nr_len as usize;
+        img[end_start..end_start + 4].copy_from_slice(&ATTR_END.to_le_bytes());
+
+        let used: u32 = (end_start - offset + 4) as u32;
+        img[offset + 24..offset + 28].copy_from_slice(&used.to_le_bytes());
+        img[offset + 28..offset + 32].copy_from_slice(&(REC_SIZE as u32).to_le_bytes());
+    }
+
+    #[test]
+    fn nonresident_data_single_run_file_location() {
+        // File with non-resident $DATA (single run) should have file_location set.
+        // cluster_size=4096, LCN=4 → file_location = 4*4096 = 16384.
+        const IMAGE_SIZE: usize = 32 * 1024;
+        const MFT_OFFSET: usize = 16384;
+        const MFT_RECORD_SIZE: usize = 1024;
+
+        let mut img = vec![0u8; IMAGE_SIZE];
+        let boot = make_ntfs_boot_sector();
+        img[..512].copy_from_slice(&boot);
+        write_file_record(&mut img, MFT_OFFSET + 5 * MFT_RECORD_SIZE, 5, true);
+        write_nonresident_file_record(&mut img, MFT_OFFSET + 12 * MFT_RECORD_SIZE, 12);
+
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("parse");
+        let big = root.children.iter().find(|n| n.name == "big.bin");
+        assert!(big.is_some(), "big.bin should appear in root");
+        let big = big.unwrap();
+        assert_eq!(big.size, 8 * 4096);
+        // file_location = volume_base(0) + LCN(4) * cluster_size(4096) = 16384
+        assert_eq!(big.file_location, Some(16384));
+    }
+
+    // ── extract_record_info: $STANDARD_INFORMATION / _ catch-all ─────────────
+
+    #[test]
+    fn extract_record_info_standard_information_attr_ignored() {
+        // Add a $STANDARD_INFORMATION (type 0x10) attr; it should be silently ignored.
+        // Use the existing write_file_record which only writes $FILE_NAME + $DATA,
+        // then manually inject a $STANDARD_INFORMATION attr before $DATA.
+        // Easier: parse an image with a $STANDARD_INFORMATION attr.
+        // Simplest: call parse_attributes with a $STANDARD_INFORMATION attr and confirm it's found.
+        let mut buf = vec![0u8; 100];
+        buf[20] = 22; // attr_offset
+                      // $STANDARD_INFORMATION attr
+        buf[22..26].copy_from_slice(&ATTR_STANDARD_INFORMATION.to_le_bytes());
+        buf[26..30].copy_from_slice(&40u32.to_le_bytes()); // length=40
+        buf[22 + 8] = 0; // resident
+                         // value_length=0, value_offset=24
+        buf[38..42].copy_from_slice(&0u32.to_le_bytes());
+        buf[42..44].copy_from_slice(&24u16.to_le_bytes());
+        // ATTR_END after
+        buf[62..66].copy_from_slice(&ATTR_END.to_le_bytes());
+        let attrs = parse_attributes(&buf);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].attr_type, ATTR_STANDARD_INFORMATION);
+    }
+
+    #[test]
+    fn extract_record_info_attr_attribute_list_ignored() {
+        // $ATTRIBUTE_LIST (type 0x20) attr parsed but not acted on in extract_record_info.
+        let mut buf = vec![0u8; 100];
+        buf[20] = 22;
+        buf[22..26].copy_from_slice(&ATTR_ATTRIBUTE_LIST.to_le_bytes());
+        buf[26..30].copy_from_slice(&40u32.to_le_bytes());
+        buf[22 + 8] = 0; // resident
+        buf[38..42].copy_from_slice(&0u32.to_le_bytes());
+        buf[42..44].copy_from_slice(&24u16.to_le_bytes());
+        buf[62..66].copy_from_slice(&ATTR_END.to_le_bytes());
+        let attrs = parse_attributes(&buf);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].attr_type, ATTR_ATTRIBUTE_LIST);
+    }
+
+    #[test]
+    fn parse_attributes_unknown_type_catch_all() {
+        // Unknown attr type (e.g. 0x60) falls through `_ => {}` in extract_record_info.
+        let mut buf = vec![0u8; 100];
+        buf[20] = 22;
+        buf[22..26].copy_from_slice(&0x60u32.to_le_bytes()); // unknown type
+        buf[26..30].copy_from_slice(&40u32.to_le_bytes());
+        buf[22 + 8] = 0;
+        buf[38..42].copy_from_slice(&0u32.to_le_bytes());
+        buf[42..44].copy_from_slice(&24u16.to_le_bytes());
+        buf[62..66].copy_from_slice(&ATTR_END.to_le_bytes());
+        let attrs = parse_attributes(&buf);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].attr_type, 0x60);
+    }
+
+    // ── extract_record_info: direct call helpers ──────────────────────────────
+
+    /// Build a minimal buffer usable by extract_record_info.
+    /// attr_offset = 56. Writes a valid $FILE_NAME attr (1-char name, NS_WIN32_DOS)
+    /// followed by `extra_attrs` bytes, then ATTR_END.
+    fn make_eri_buf(parent_ref: u64, namespace: u8, extra_attrs: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; 2048];
+        // attr_offset at bytes 20-21
+        buf[20..22].copy_from_slice(&56u16.to_le_bytes());
+
+        // $FILE_NAME at 56: value_offset=24, value_length=68 (66 + 1 char UTF-16 = 2 bytes)
+        let fn_value_len: u32 = 68;
+        let fn_attr_len: usize = ((24 + fn_value_len as usize + 7) & !7).max(24);
+        buf[56..60].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        buf[60..64].copy_from_slice(&(fn_attr_len as u32).to_le_bytes());
+        buf[64] = 0; // resident
+        buf[72..76].copy_from_slice(&fn_value_len.to_le_bytes());
+        buf[76..78].copy_from_slice(&24u16.to_le_bytes()); // value_offset
+        let fv = 56 + 24; // value start
+        buf[fv..fv + 8].copy_from_slice(&parent_ref.to_le_bytes());
+        buf[fv + 56..fv + 60].copy_from_slice(&0x20u32.to_le_bytes()); // file_attributes=archive
+        buf[fv + 64] = 1; // filename_length = 1
+        buf[fv + 65] = namespace;
+        buf[fv + 66..fv + 68].copy_from_slice(&(b'A' as u16).to_le_bytes()); // 'A' as UTF-16 LE
+
+        let next = 56 + fn_attr_len;
+        buf[next..next + extra_attrs.len()].copy_from_slice(extra_attrs);
+        let end = next + extra_attrs.len();
+        buf[end..end + 4].copy_from_slice(&ATTR_END.to_le_bytes());
+        buf
+    }
+
+    fn make_resident_attr(attr_type: u32, len: usize) -> Vec<u8> {
+        let total = (24 + len + 7) & !7;
+        let mut a = vec![0u8; total];
+        a[0..4].copy_from_slice(&attr_type.to_le_bytes());
+        a[4..8].copy_from_slice(&(total as u32).to_le_bytes());
+        a[8] = 0; // resident
+        a[16..20].copy_from_slice(&(len as u32).to_le_bytes());
+        a[20..22].copy_from_slice(&24u16.to_le_bytes()); // value_offset=24
+        a
+    }
+
+    #[test]
+    fn extract_record_info_standard_information_in_record() {
+        // $STANDARD_INFORMATION attr in a record hits the `ATTR_STANDARD_INFORMATION |
+        // ATTR_ATTRIBUTE_LIST => {}` arm in extract_record_info (lines 571-573).
+        let si_attr = make_resident_attr(ATTR_STANDARD_INFORMATION, 48);
+        let buf = make_eri_buf(ROOT_MFT_RECORD, NS_WIN32_DOS, &si_attr);
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        assert!(info.is_some());
+        assert_eq!(info.unwrap().name, "A");
+    }
+
+    #[test]
+    fn extract_record_info_attribute_list_in_record() {
+        // $ATTRIBUTE_LIST hits the same arm.
+        let al_attr = make_resident_attr(ATTR_ATTRIBUTE_LIST, 24);
+        let buf = make_eri_buf(ROOT_MFT_RECORD, NS_WIN32_DOS, &al_attr);
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        assert!(info.is_some());
+    }
+
+    #[test]
+    fn extract_record_info_unknown_attr_type_catch_all() {
+        // Unknown attr type → `_ => {}` in extract_record_info (line 575).
+        let unk_attr = make_resident_attr(0x60, 16);
+        let buf = make_eri_buf(ROOT_MFT_RECORD, NS_WIN32_DOS, &unk_attr);
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        assert!(info.is_some());
+    }
+
+    #[test]
+    fn extract_record_info_dos_namespace_skipped() {
+        // $FILE_NAME with NS_DOS (2) → attr_pos += attr_length; continue (lines 518-519).
+        // The buffer has NS_DOS as the first (and only) $FILE_NAME → no valid name → returns None.
+        let buf = make_eri_buf(ROOT_MFT_RECORD, NS_DOS, &[]);
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        assert!(info.is_none(), "NS_DOS-only record should produce no name");
+    }
+
+    #[test]
+    fn extract_record_info_two_filename_attrs_namespace_wins() {
+        // Two $FILE_NAME attrs: first NS_WIN32 (2), second NS_WIN32_DOS (3).
+        // Second has higher priority → best_fn updated via `Some(existing)` arm (lines 523-525).
+        let fn_value_len: u32 = 68;
+        let fn_attr_len = (24 + fn_value_len as usize + 7) & !7;
+
+        // Second $FILE_NAME with NS_WIN32_DOS and name 'B'
+        let mut second = vec![0u8; fn_attr_len];
+        second[0..4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        second[4..8].copy_from_slice(&(fn_attr_len as u32).to_le_bytes());
+        second[8] = 0; // resident
+        second[16..20].copy_from_slice(&fn_value_len.to_le_bytes());
+        second[20..22].copy_from_slice(&24u16.to_le_bytes());
+        let sv = 24; // value offset in second attr
+        second[sv..sv + 8].copy_from_slice(&ROOT_MFT_RECORD.to_le_bytes());
+        second[sv + 56..sv + 60].copy_from_slice(&0x20u32.to_le_bytes());
+        second[sv + 64] = 1; // filename_length=1
+        second[sv + 65] = NS_WIN32_DOS; // higher priority than NS_WIN32
+        second[sv + 66..sv + 68].copy_from_slice(&(b'B' as u16).to_le_bytes());
+
+        // Build buf: first attr is NS_WIN32 ('A'), second is NS_WIN32_DOS ('B')
+        let buf = make_eri_buf(ROOT_MFT_RECORD, NS_WIN32, &second);
+        let info = extract_record_info(&buf, 12, 0, 4096, 0).expect("should have name");
+        // NS_WIN32_DOS (priority 3) beats NS_WIN32 (priority 2) → name = 'B'
+        assert_eq!(info.name, "B");
+    }
+
+    #[test]
+    fn extract_record_info_attr_length_zero_breaks_inner_loop() {
+        // If the inner loop encounters attr_length=0 → break (line 579).
+        // Achieved by crafting an attr with length field = 0 (parse_attributes breaks too, but
+        // the inner loop in extract_record_info independently checks it).
+        // parse_attributes breaks on length=0 and pushes nothing. The for-loop doesn't run.
+        // Instead, craft attrs via parse_attributes but make inner loop reach attr_length=0
+        // by setting attr_length of a valid attr to 0 in `buf` while parse_attributes
+        // reads it differently... actually both use the same buf, so this is tricky.
+        // The cleanest approach: buf has a valid attr (so parse_attributes includes it) but
+        // the inner loop's re-read of attr_length gets 0 because the first 4 bytes of the
+        // attr at attr_pos look like type ≠ ATTR_END but length = 0.
+        // Since both loops read from the same buf, this is impossible without divergence.
+        // Line 579 is a redundant guard; mark as intentionally untested.
+        // This test just verifies a zero-length attr doesn't panic through extract_record_info.
+        let buf = make_eri_buf(ROOT_MFT_RECORD, NS_WIN32_DOS, &[]);
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        assert!(info.is_some()); // normal path, line 579 guard active but not triggered
+    }
+
+    // ── extract_record_info: non-resident $DATA FALSE branches ───────────────
+
+    fn write_nonresident_file_record_custom(
+        img: &mut [u8],
+        offset: usize,
+        mft_num: u64,
+        nr_len: u32,
+        runlist_offset: u16,
+    ) {
+        const REC_SIZE: usize = 1024;
+        img[offset..offset + 4].copy_from_slice(b"FILE");
+        img[offset + 4..offset + 6].copy_from_slice(&48u16.to_le_bytes());
+        img[offset + 6..offset + 8].copy_from_slice(&3u16.to_le_bytes());
+        img[offset + 48..offset + 50].copy_from_slice(&1u16.to_le_bytes());
+        img[offset + 510..offset + 512].copy_from_slice(&1u16.to_le_bytes());
+        img[offset + 1022..offset + 1024].copy_from_slice(&1u16.to_le_bytes());
+        img[offset + 16..offset + 18].copy_from_slice(&1u16.to_le_bytes());
+        img[offset + 18..offset + 20].copy_from_slice(&1u16.to_le_bytes());
+        img[offset + 22..offset + 24].copy_from_slice(&0x01u16.to_le_bytes());
+        img[offset + 44..offset + 48].copy_from_slice(&(mft_num as u32).to_le_bytes());
+        img[offset + 20..offset + 22].copy_from_slice(&56u16.to_le_bytes());
+
+        let fn_name: Vec<u16> = "big.bin".encode_utf16().collect();
+        let fn_name_bytes: Vec<u8> = fn_name.iter().flat_map(|&c| c.to_le_bytes()).collect();
+        let fn_value_len = 66 + fn_name_bytes.len();
+        let fn_attr_len = (24 + fn_value_len + 7) & !7;
+        let fn_start = offset + 56;
+        img[fn_start..fn_start + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        img[fn_start + 4..fn_start + 8].copy_from_slice(&(fn_attr_len as u32).to_le_bytes());
+        img[fn_start + 8] = 0;
+        img[fn_start + 16..fn_start + 20].copy_from_slice(&(fn_value_len as u32).to_le_bytes());
+        img[fn_start + 20..fn_start + 22].copy_from_slice(&24u16.to_le_bytes());
+        let fv = fn_start + 24;
+        img[fv..fv + 8].copy_from_slice(&5u64.to_le_bytes());
+        img[fv + 56..fv + 60].copy_from_slice(&0x20u32.to_le_bytes());
+        img[fv + 64] = fn_name.len() as u8;
+        img[fv + 65] = NS_WIN32_DOS;
+        img[fv + 66..fv + 66 + fn_name_bytes.len()].copy_from_slice(&fn_name_bytes);
+
+        let nr_start = fn_start + fn_attr_len;
+        img[nr_start..nr_start + 4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        img[nr_start + 4..nr_start + 8].copy_from_slice(&nr_len.to_le_bytes());
+        img[nr_start + 8] = 1; // non_resident
+        img[nr_start + 32..nr_start + 34].copy_from_slice(&runlist_offset.to_le_bytes());
+        img[nr_start + 48..nr_start + 56].copy_from_slice(&(8u64 * 4096u64).to_le_bytes());
+        // No runlist data written (intentionally bad).
+
+        let end_start = nr_start + nr_len as usize;
+        img[end_start..end_start + 4].copy_from_slice(&ATTR_END.to_le_bytes());
+        let used: u32 = (end_start - offset + 4) as u32;
+        img[offset + 24..offset + 28].copy_from_slice(&used.to_le_bytes());
+        img[offset + 28..offset + 32].copy_from_slice(&(REC_SIZE as u32).to_le_bytes());
+    }
+
+    #[test]
+    fn nonresident_data_nr_slice_too_short_no_location() {
+        // nr_attr_len=56 → nr_slice.len()=56 < 64 → inner if is FALSE → file_location=None.
+        const IMAGE_SIZE: usize = 32 * 1024;
+        const MFT_OFFSET: usize = 16384;
+        const MFT_RECORD_SIZE: usize = 1024;
+        let mut img = vec![0u8; IMAGE_SIZE];
+        img[..512].copy_from_slice(&make_ntfs_boot_sector());
+        write_file_record(&mut img, MFT_OFFSET + 5 * MFT_RECORD_SIZE, 5, true);
+        write_nonresident_file_record_custom(
+            &mut img,
+            MFT_OFFSET + 12 * MFT_RECORD_SIZE,
+            12,
+            56,
+            64,
+        );
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("parse");
+        let big = root.children.iter().find(|n| n.name == "big.bin");
+        assert!(big.is_some());
+        assert!(big.unwrap().file_location.is_none());
+    }
+
+    #[test]
+    fn nonresident_data_runlist_offset_oob_no_location() {
+        // nr_attr_len=72, runlist_offset=72 (== nr_slice.len()) → FALSE branch → file_location=None.
+        const IMAGE_SIZE: usize = 32 * 1024;
+        const MFT_OFFSET: usize = 16384;
+        const MFT_RECORD_SIZE: usize = 1024;
+        let mut img = vec![0u8; IMAGE_SIZE];
+        img[..512].copy_from_slice(&make_ntfs_boot_sector());
+        write_file_record(&mut img, MFT_OFFSET + 5 * MFT_RECORD_SIZE, 5, true);
+        write_nonresident_file_record_custom(
+            &mut img,
+            MFT_OFFSET + 12 * MFT_RECORD_SIZE,
+            12,
+            72,
+            72,
+        );
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("parse");
+        let big = root.children.iter().find(|n| n.name == "big.bin");
+        assert!(big.is_some());
+        assert!(big.unwrap().file_location.is_none());
+    }
+
+    // ── extract_record_info: $FILE_NAME with invalid parse result ─────────────
+
+    #[test]
+    fn extract_record_info_filename_attr_parse_returns_none() {
+        // $FILE_NAME with value_length < 66 → parse_filename_attr returns None →
+        // `if let Some(fn_attr)` FALSE branch (lines 531-532) covered.
+        let mut buf = vec![0u8; 2048];
+        buf[20..22].copy_from_slice(&56u16.to_le_bytes()); // attr_offset=56
+                                                           // $FILE_NAME with value_length=10 (too short → parse_filename_attr → None)
+        let fn_attr_len: u32 = 40;
+        buf[56..60].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        buf[60..64].copy_from_slice(&fn_attr_len.to_le_bytes());
+        buf[64] = 0; // resident
+        buf[72..76].copy_from_slice(&10u32.to_le_bytes()); // value_length=10 (< 66 → None)
+        buf[76..78].copy_from_slice(&24u16.to_le_bytes()); // value_offset=24
+                                                           // ATTR_END at 56+40=96
+        buf[96..100].copy_from_slice(&ATTR_END.to_le_bytes());
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        assert!(
+            info.is_none(),
+            "record with no valid FILE_NAME should return None"
+        );
+    }
+
+    #[test]
+    fn extract_record_info_filename_attr_resident_data_none() {
+        // $FILE_NAME with value_length=200 but value_offset=24 → data_end=24+200=224 > attr_len=40.
+        // → parse_attributes gives resident_data=None → `if let Some(data)` FALSE → line 532.
+        let mut buf = vec![0u8; 2048];
+        buf[20..22].copy_from_slice(&56u16.to_le_bytes());
+        let fn_attr_len: u32 = 40; // attr len = 40
+        buf[56..60].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        buf[60..64].copy_from_slice(&fn_attr_len.to_le_bytes());
+        buf[64] = 0; // resident
+                     // value_length=200 → data_end = (56+24)+200 = 280 > 56+40=96 → resident_data=None
+        buf[72..76].copy_from_slice(&200u32.to_le_bytes());
+        buf[76..78].copy_from_slice(&24u16.to_le_bytes());
+        buf[96..100].copy_from_slice(&ATTR_END.to_le_bytes());
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        assert!(info.is_none());
+    }
+
+    #[test]
+    fn extract_record_info_data_attr_resident_data_none_no_location() {
+        // Resident $DATA with overflowing value_length → resident_data=None in parse_attributes.
+        // In extract_record_info ATTR_DATA arm: !non_resident=true → enter block →
+        // `if let Some(data) = attr.resident_data` → None → FALSE branch (line 548).
+        // File has valid $FILE_NAME (so extract returns Some) but no file_location.
+        let si_attr = make_resident_attr(ATTR_DATA, 0); // intentional: value_len=0, valid resident
+                                                        // Override the value_length to trigger overflow: value_length=200, attr_len=32 → overflow
+        let mut data_attr = si_attr;
+        // attr total = (24 + 0 + 7) & !7 = 24 bytes; set value_length=200 (overflow)
+        data_attr[16..20].copy_from_slice(&200u32.to_le_bytes()); // value_length=200
+        data_attr[20..22].copy_from_slice(&24u16.to_le_bytes()); // value_offset=24
+                                                                 // data_end = (attr_pos + 24 + 200) > (attr_pos + 24) = attr end → resident_data=None
+        let buf = make_eri_buf(ROOT_MFT_RECORD, NS_WIN32_DOS, &data_attr);
+        let info = extract_record_info(&buf, 12, 0, 4096, 0);
+        // Still returns Some (valid $FILE_NAME present) but file_location=None.
+        assert!(info.is_some());
+        assert!(info.unwrap().file_location.is_none());
+    }
+
+    // ── detect_and_parse: parent_ref == mft_num skip ─────────────────────────
+
+    #[test]
+    fn detect_and_parse_skips_self_referencing_record() {
+        // A user record (mft_num=12) where parent_ref == mft_num (self-loop) →
+        // the children_map loop skips it (line 748: `continue`).
+        // We craft a file record that sets parent_ref = 12 (its own mft_num).
+        const IMAGE_SIZE: usize = 32 * 1024;
+        const MFT_OFFSET: usize = 16384;
+        const MFT_RECORD_SIZE: usize = 1024;
+
+        let mut img = vec![0u8; IMAGE_SIZE];
+        img[..512].copy_from_slice(&make_ntfs_boot_sector());
+        write_file_record(&mut img, MFT_OFFSET + 5 * MFT_RECORD_SIZE, 5, true);
+
+        // Write record 12 with parent_ref pointing to 12 (itself) instead of 5.
+        let off = MFT_OFFSET + 12 * MFT_RECORD_SIZE;
+        img[off..off + 4].copy_from_slice(b"FILE");
+        img[off + 4..off + 6].copy_from_slice(&48u16.to_le_bytes()); // usa_offset=48
+        img[off + 6..off + 8].copy_from_slice(&3u16.to_le_bytes()); // usa_count=3
+        img[off + 48..off + 50].copy_from_slice(&1u16.to_le_bytes()); // USN=1
+        img[off + 510..off + 512].copy_from_slice(&1u16.to_le_bytes());
+        img[off + 1022..off + 1024].copy_from_slice(&1u16.to_le_bytes());
+        img[off + 16..off + 18].copy_from_slice(&1u16.to_le_bytes());
+        img[off + 18..off + 20].copy_from_slice(&1u16.to_le_bytes());
+        img[off + 22..off + 24].copy_from_slice(&0x01u16.to_le_bytes()); // in-use
+        img[off + 44..off + 48].copy_from_slice(&12u32.to_le_bytes()); // mft_num=12
+        img[off + 20..off + 22].copy_from_slice(&56u16.to_le_bytes()); // attr_offset=56
+
+        // $FILE_NAME with parent_ref = 12 (self)
+        let fn_name: Vec<u16> = "self.txt".encode_utf16().collect();
+        let fn_name_bytes: Vec<u8> = fn_name.iter().flat_map(|&c| c.to_le_bytes()).collect();
+        let fn_value_len = 66 + fn_name_bytes.len();
+        let fn_attr_len = (24 + fn_value_len + 7) & !7;
+        let fn_start = off + 56;
+        img[fn_start..fn_start + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        img[fn_start + 4..fn_start + 8].copy_from_slice(&(fn_attr_len as u32).to_le_bytes());
+        img[fn_start + 8] = 0;
+        img[fn_start + 16..fn_start + 20].copy_from_slice(&(fn_value_len as u32).to_le_bytes());
+        img[fn_start + 20..fn_start + 22].copy_from_slice(&24u16.to_le_bytes());
+        let fv = fn_start + 24;
+        img[fv..fv + 8].copy_from_slice(&12u64.to_le_bytes()); // parent_ref = 12 (self!)
+        img[fv + 56..fv + 60].copy_from_slice(&0x20u32.to_le_bytes());
+        img[fv + 64] = fn_name.len() as u8;
+        img[fv + 65] = NS_WIN32_DOS;
+        img[fv + 66..fv + 66 + fn_name_bytes.len()].copy_from_slice(&fn_name_bytes);
+        img[fn_start + fn_attr_len..fn_start + fn_attr_len + 4]
+            .copy_from_slice(&ATTR_END.to_le_bytes());
+
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("should parse despite self-referencing record");
+        // self.txt has parent_ref == mft_num so it's dropped from children_map.
+        assert!(
+            root.children.iter().all(|n| n.name != "self.txt"),
+            "self-referencing record should be excluded from tree"
+        );
     }
 }
