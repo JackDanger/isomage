@@ -1304,4 +1304,157 @@ mod tests {
             "got: {msg}"
         );
     }
+
+    // ── Synthetic ISO builder ─────────────────────────────────────────────────
+
+    fn make_minimal_iso() -> Vec<u8> {
+        const SECTOR: usize = 2048;
+        let mut img = vec![0u8; 19 * SECTOR];
+
+        // Sector 16: PVD
+        let pvd = 16 * SECTOR;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        img[pvd + 6] = 1;
+        let vol_size: u32 = 19;
+        img[pvd + 80..pvd + 84].copy_from_slice(&vol_size.to_le_bytes());
+        img[pvd + 84..pvd + 88].copy_from_slice(&vol_size.to_be_bytes());
+        let block_size: u16 = 2048;
+        img[pvd + 128..pvd + 130].copy_from_slice(&block_size.to_le_bytes());
+        img[pvd + 130..pvd + 132].copy_from_slice(&block_size.to_be_bytes());
+        // Root directory record at offset 156
+        let rdr = pvd + 156;
+        img[rdr] = 34;
+        let root_sector: u32 = 18;
+        img[rdr + 2..rdr + 6].copy_from_slice(&root_sector.to_le_bytes());
+        img[rdr + 6..rdr + 10].copy_from_slice(&root_sector.to_be_bytes());
+        let dir_len: u32 = 2048;
+        img[rdr + 10..rdr + 14].copy_from_slice(&dir_len.to_le_bytes());
+        img[rdr + 14..rdr + 18].copy_from_slice(&dir_len.to_be_bytes());
+        img[rdr + 25] = 0x02;
+        img[rdr + 32] = 1;
+        img[rdr + 33] = 0x00; // "." self-entry
+
+        // Sector 17: terminator
+        let term = 17 * SECTOR;
+        img[term] = 255;
+        img[term + 1..term + 6].copy_from_slice(b"CD001");
+        img[term + 6] = 1;
+
+        // Sector 18: root directory data ("." and ".." entries)
+        let dir = 18 * SECTOR;
+        img[dir] = 34;
+        img[dir + 2..dir + 6].copy_from_slice(&root_sector.to_le_bytes());
+        img[dir + 6..dir + 10].copy_from_slice(&root_sector.to_be_bytes());
+        img[dir + 10..dir + 14].copy_from_slice(&dir_len.to_le_bytes());
+        img[dir + 14..dir + 18].copy_from_slice(&dir_len.to_be_bytes());
+        img[dir + 25] = 0x02;
+        img[dir + 32] = 1;
+        img[dir + 33] = 0x00;
+        img[dir + 34] = 34;
+        img[dir + 36..dir + 40].copy_from_slice(&root_sector.to_le_bytes());
+        img[dir + 40..dir + 44].copy_from_slice(&root_sector.to_be_bytes());
+        img[dir + 44..dir + 48].copy_from_slice(&dir_len.to_le_bytes());
+        img[dir + 48..dir + 52].copy_from_slice(&dir_len.to_be_bytes());
+        img[dir + 59] = 0x02;
+        img[dir + 66] = 1;
+        img[dir + 67] = 0x01; // ".." parent-entry
+
+        img
+    }
+
+    // ── Verbose detection coverage ────────────────────────────────────────────
+
+    #[test]
+    fn test_verbose_detection_succeeds_on_synthetic_iso() {
+        let img = make_minimal_iso();
+        let mut cur = std::io::Cursor::new(img);
+        let result = detect_and_parse_filesystem_verbose(&mut cur, "synthetic.iso", true);
+        assert!(result.is_ok(), "verbose detection should succeed: {:?}", result);
+        let root = result.unwrap();
+        assert_eq!(root.name, "/");
+        assert!(root.is_directory);
+    }
+
+    #[test]
+    fn test_verbose_detection_reports_errors_on_garbage() {
+        let garbage = vec![0xABu8; 4096];
+        let mut cur = std::io::Cursor::new(garbage);
+        let result = detect_and_parse_filesystem_verbose(&mut cur, "garbage.bin", true);
+        assert!(result.is_err(), "verbose detection on garbage should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unable to detect"),
+            "error should say 'Unable to detect', got: {}",
+            msg
+        );
+    }
+
+    // ── cat_node non-BrokenPipe write error ──────────────────────────────────
+
+    struct AlwaysFailWriter;
+    impl Write for AlwaysFailWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"))
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn test_cat_node_propagates_non_broken_pipe_error() {
+        let img = make_minimal_iso();
+        let mut cur = std::io::Cursor::new(img);
+        let node = TreeNode::new_file_with_location("term.bin".to_string(), 6, 17 * 2048, 6);
+        let mut w = AlwaysFailWriter;
+        let result = cat_node(&mut cur, &node, &mut w);
+        assert!(result.is_err(), "cat_node should propagate PermissionDenied");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("permission denied") || msg.contains("Permission denied"),
+            "got: {}",
+            msg
+        );
+    }
+
+    // ── safe_join path-escape detection ──────────────────────────────────────
+
+    #[test]
+    fn test_safe_join_detects_path_escape() {
+        let root = std::env::temp_dir().join("isomage_safe_join_root_a");
+        let here = std::env::temp_dir().join("isomage_safe_join_root_b");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&here).unwrap();
+        let result = safe_join(&root, &here, "legit.txt");
+        assert!(result.is_err(), "safe_join must reject target outside root");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("escape") || msg.contains("outside"),
+            "error should mention path escape, got: {}",
+            msg
+        );
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&here).ok();
+    }
+
+    // ── extract_file_at missing location ─────────────────────────────────────
+
+    #[test]
+    fn test_extract_directory_child_without_location_errors() {
+        let img = make_minimal_iso();
+        let mut cur = std::io::Cursor::new(img);
+        let mut dir = TreeNode::new_directory("mydir".to_string());
+        dir.add_child(TreeNode::new_file("orphan.bin".to_string(), 10));
+        let out = std::env::temp_dir().join("isomage_test_extract_no_loc");
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let result = extract_node(&mut cur, &dir, out.to_str().unwrap());
+        assert!(result.is_err(), "extracting child with no location must error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not available"),
+            "error should mention 'not available', got: {}",
+            msg
+        );
+        std::fs::remove_dir_all(&out).ok();
+    }
 }

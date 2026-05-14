@@ -2063,4 +2063,104 @@ mod tests {
         let root = parse_udf_verbose(&mut c, true).expect("non-printable id should succeed");
         assert_eq!(root.name, "/");
     }
+
+    // ── AVDP-not-found verbose path ───────────────────────────────────────────
+
+    #[test]
+    fn parse_udf_verbose_no_avdp() {
+        // Covers the eprintln! at the AVDP-not-found branch (line 159).
+        let mut img = make_udf_image();
+        img[256 * S] = 0;
+        img[256 * S + 1] = 0;
+        let mut c = Cursor::new(img);
+        let result = parse_udf_verbose(&mut c, true);
+        assert!(result.is_err());
+    }
+
+    // ── Metadata partition path ───────────────────────────────────────────────
+
+    /// UDF image where the FSD is accessed via a metadata partition.
+    ///
+    /// Layout (2048-byte sectors):
+    ///  256  — AVDP (VDS at sector 257, length 5*S)
+    ///  257  — PD partition 0 (starts at sector 263)
+    ///  258  — PD partition 1 (starts at sector 267; metadata backing)
+    ///  259  — LVD (FSD at partition=0 location=0; type-2 map → partition 1)
+    ///  260  — TD
+    ///  267  — Metadata File Entry (Short AD → location 1 → sector 268)
+    ///  268  — FSD (tag 256, root ICB location=1 partition=0)
+    ///  269  — Root FE (inline, parent FID only)
+    fn make_udf_metadata_partition_image() -> Vec<u8> {
+        let mut img = vec![0u8; 270 * S];
+
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+
+        // AVDP at sector 256: VDS at sector 257, length 5*S bytes
+        w16(&mut img, 256 * S, 2);
+        w32(&mut img, 256 * S + 16, (5 * S) as u32);
+        w32(&mut img, 256 * S + 20, 257);
+
+        // PD partition 0 at sector 257: starts at sector 263
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 263);
+
+        // PD partition 1 at sector 258: starts at sector 267 (metadata backing)
+        w16(&mut img, 258 * S, 5);
+        w16(&mut img, 258 * S + 22, 1);
+        w32(&mut img, 258 * S + 188, 267);
+
+        // LVD at sector 259
+        w16(&mut img, 259 * S, 6);
+        w32(&mut img, 259 * S + 248, S as u32); // FSD LongAD length
+        w32(&mut img, 259 * S + 252, 0); // FSD location = 0
+        w16(&mut img, 259 * S + 256, 0); // FSD partition = 0
+        w32(&mut img, 259 * S + 264, 64); // MapTableLength = 64
+        w32(&mut img, 259 * S + 268, 1); // NumPartitionMaps = 1
+        // Type-2 partition map at LVD offset 440
+        img[259 * S + 440] = 2; // map_type = 2
+        img[259 * S + 441] = 64; // map_length = 64
+        img[259 * S + 445..259 * S + 468].copy_from_slice(b"*UDF Metadata Partition");
+        w16(&mut img, 259 * S + 478, 1); // meta_part_ref = partition 1
+        w32(&mut img, 259 * S + 480, 0); // meta_file_loc = 0
+
+        // TD at sector 260
+        w16(&mut img, 260 * S, 8);
+
+        // Metadata File Entry at sector 267 (partition 1 start=267, file_location=0)
+        // Short AD → location 1 → sector 268
+        w16(&mut img, 267 * S, 261);
+        w16(&mut img, 267 * S + 18, 0); // ICB flags: ad_type = 0 (Short ADs)
+        w32(&mut img, 267 * S + 172, 8); // AD length = 8
+        w32(&mut img, 267 * S + 176, S as u32); // Short AD length (recorded)
+        w32(&mut img, 267 * S + 180, 1); // Short AD location = 1
+
+        // FSD at sector 268: root ICB at location=1, partition=0
+        w16(&mut img, 268 * S, 256);
+        w32(&mut img, 268 * S + 400, S as u32);
+        w32(&mut img, 268 * S + 404, 1); // root ICB location = 1
+        w16(&mut img, 268 * S + 408, 0); // root ICB partition = 0
+
+        // Root FE at sector 269 (partition_start=268, location=1 → 269): inline, parent FID
+        w16(&mut img, 269 * S, 261);
+        w16(&mut img, 269 * S + 18, 3); // inline
+        w32(&mut img, 269 * S + 172, 40); // AD length = 40
+        w16(&mut img, 269 * S + 176, 257); // FID tag_id
+        img[269 * S + 176 + 18] = 0x08; // PARENT flag
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_metadata_partition_path() {
+        let img = make_udf_metadata_partition_image();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c)
+            .expect("parse_udf failed on metadata-partition synthetic image");
+        assert_eq!(root.name, "/");
+        assert!(root.is_directory);
+        assert!(root.children.is_empty());
+    }
 }
