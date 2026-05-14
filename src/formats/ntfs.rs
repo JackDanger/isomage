@@ -763,6 +763,93 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Seek, SeekFrom};
 
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(msg.contains("short") || msg.contains("NTFS"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(msg.contains("OEM") || msg.contains("magic"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_cluster_size() {
+        let msg = format!("{}", Error::BadClusterSize);
+        assert!(
+            msg.contains("cluster") || msg.contains("invalid"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_too_deep() {
+        let msg = format!("{}", Error::TooDeep);
+        assert!(
+            msg.contains("depth") || msg.contains("recursion"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let msg = format!("{}", Error::Io(std::io::Error::other("disk")));
+        assert!(msg.contains("disk"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        assert!(Error::Io(std::io::Error::other("s")).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::BadClusterSize.source().is_none());
+        assert!(Error::TooDeep.source().is_none());
+    }
+
+    // ── parse_boot_sector error paths ─────────────────────────────────────────
+
+    #[test]
+    fn parse_boot_sector_too_short() {
+        assert!(matches!(parse_boot_sector(&[0u8; 10]), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn parse_boot_sector_bad_magic() {
+        let mut data = vec![0u8; 512];
+        // OEM ID deliberately wrong
+        data[3..11].copy_from_slice(b"NOTNTFS!");
+        assert!(matches!(parse_boot_sector(&data), Err(Error::BadMagic)));
+    }
+
+    #[test]
+    fn parse_boot_sector_bad_sector_size() {
+        let mut data = vec![0u8; 512];
+        data[3..11].copy_from_slice(NTFS_OEM_ID);
+        // bytes_per_sector = 0 (invalid)
+        data[11..13].copy_from_slice(&0u16.to_le_bytes());
+        data[13] = 8; // sectors_per_cluster
+        assert!(matches!(parse_boot_sector(&data), Err(Error::BadClusterSize)));
+    }
+
+    #[test]
+    fn parse_boot_sector_zero_sectors_per_cluster() {
+        let mut data = vec![0u8; 512];
+        data[3..11].copy_from_slice(NTFS_OEM_ID);
+        data[11..13].copy_from_slice(&512u16.to_le_bytes()); // valid sector size
+        data[13] = 0; // sectors_per_cluster = 0 (invalid)
+        assert!(matches!(parse_boot_sector(&data), Err(Error::BadClusterSize)));
+    }
+
     // ── Minimal in-memory NTFS image builder ──────────────────────────────
 
     /// Build a minimal valid NTFS boot sector at offset 0 of an in-memory

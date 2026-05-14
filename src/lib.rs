@@ -1100,14 +1100,7 @@ mod tests {
             }
             let take = buf.len().min(self.budget - self.written);
             self.written += take;
-            if take == 0 {
-                Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "downstream closed",
-                ))
-            } else {
-                Ok(take)
-            }
+            Ok(take)
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
@@ -1214,6 +1207,51 @@ mod tests {
         // Valid join: stays inside
         let result = safe_join(root, here, "file.txt");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn safe_join_detects_here_outside_root() {
+        // here is not a subdirectory of root — triggers the path-escape guard.
+        let root = Path::new("/tmp/output");
+        let here = Path::new("/other_dir");
+        let result = safe_join(root, here, "file.txt");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("path escape"), "got: {msg}");
+    }
+
+    #[test]
+    fn extract_node_errors_when_no_file_location() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // new_file creates a node with file_location = None
+        let node = TreeNode::new_file("orphan.txt".to_string(), 100);
+        let mut c = std::io::Cursor::new(vec![0u8; 100]);
+        let result = extract_node(&mut c, &node, tmp.path().to_str().unwrap());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("location") || msg.contains("not available"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cat_node_swallows_broken_pipe_after_partial_write() {
+        // Exercises the Ok(take) path in BrokenPipeAfter (non-zero budget).
+        let data = b"hello world";
+        let mut img = vec![0u8; 512];
+        img[..data.len()].copy_from_slice(data);
+        let mut c = std::io::Cursor::new(img);
+        let node = TreeNode::new_file_with_location("f".to_string(), 11, 0, 11);
+        let mut w = BrokenPipeAfter {
+            budget: 3,
+            written: 0,
+        };
+        let result = cat_node(&mut c, &node, &mut w);
+        assert!(
+            result.is_ok(),
+            "cat_node should treat BrokenPipe as Ok after partial write"
+        );
     }
 
     #[test]
