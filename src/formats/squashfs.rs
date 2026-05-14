@@ -11,10 +11,9 @@
 //!
 //! ## Magic and endianness
 //!
-//! SquashFS supports both little-endian (magic `0x73717368`) and
-//! big-endian (magic `0x68737173`) layouts. We detect both and record
-//! the byte order at parse time so every subsequent field read uses the
-//! same `from_{le,be}_bytes` variant.
+//! SquashFS images are either little-endian (magic `0x73717368`) or
+//! big-endian (magic `0x68737173`). This reader only supports LE images;
+//! BE images are detected and rejected with [`Error::BadMagic`].
 //!
 //! ## Metadata blocks
 //!
@@ -156,65 +155,35 @@ impl Superblock {
             }
         })?;
 
-        // Determine endianness from magic.
-        let magic_le = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let magic_be = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let little_endian = if magic_le == MAGIC_LE {
-            true
-        } else if magic_be == MAGIC_BE {
-            false
-        } else {
+        // Read bytes 0-3 as LE. LE squashfs images yield MAGIC_LE; BE squashfs
+        // images (bytes reversed) yield MAGIC_BE. We only parse LE images.
+        let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if magic == MAGIC_BE {
+            // Big-endian squashfs — all subsequent LE field reads would be garbage.
             return Err(Error::BadMagic);
-        };
+        }
+        if magic != MAGIC_LE {
+            return Err(Error::BadMagic);
+        }
 
-        let u16_at = |off: usize| -> u16 {
-            if little_endian {
-                u16::from_le_bytes([buf[off], buf[off + 1]])
-            } else {
-                u16::from_be_bytes([buf[off], buf[off + 1]])
-            }
-        };
+        let u16_at = |off: usize| -> u16 { u16::from_le_bytes([buf[off], buf[off + 1]]) };
         let u32_at = |off: usize| -> u32 {
-            if little_endian {
-                u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-            } else {
-                u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-            }
+            u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
         };
         let u64_at = |off: usize| -> u64 {
-            if little_endian {
-                u64::from_le_bytes([
-                    buf[off],
-                    buf[off + 1],
-                    buf[off + 2],
-                    buf[off + 3],
-                    buf[off + 4],
-                    buf[off + 5],
-                    buf[off + 6],
-                    buf[off + 7],
-                ])
-            } else {
-                u64::from_be_bytes([
-                    buf[off],
-                    buf[off + 1],
-                    buf[off + 2],
-                    buf[off + 3],
-                    buf[off + 4],
-                    buf[off + 5],
-                    buf[off + 6],
-                    buf[off + 7],
-                ])
-            }
+            u64::from_le_bytes([
+                buf[off],
+                buf[off + 1],
+                buf[off + 2],
+                buf[off + 3],
+                buf[off + 4],
+                buf[off + 5],
+                buf[off + 6],
+                buf[off + 7],
+            ])
         };
 
         let block_size = u32_at(12);
-
-        // Reject big-endian images: the superblock magic check accepts BE
-        // magic (0x68737173) but every subsequent parse uses LE byte order,
-        // which would produce garbage on a real BE image. Reject cleanly.
-        if !little_endian {
-            return Err(Error::BadMagic);
-        }
 
         // block_size is a divisor in block_count_for; reject 0 to prevent panic.
         if block_size == 0 {
@@ -613,9 +582,8 @@ fn detect_inner<R: Read + Seek>(r: &mut R) -> Result<(), Error> {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(Error::TooShort),
         Err(e) => return Err(Error::Io(e)),
     }
-    let le = u32::from_le_bytes(buf);
-    let be = u32::from_be_bytes(buf);
-    if le == MAGIC_LE || be == MAGIC_BE {
+    let magic = u32::from_le_bytes(buf);
+    if magic == MAGIC_LE {
         Ok(())
     } else {
         Err(Error::BadMagic)
@@ -1330,26 +1298,33 @@ mod tests {
         assert!(matches!(result, Err(Error::Io(_))));
     }
 
-    // ── Big-endian magic rejected (line 216) ─────────────────────────────────
+    // ── Big-endian images rejected ────────────────────────────────────────────
 
     #[test]
-    fn superblock_read_big_endian_magic_returns_bad_magic() {
-        // MAGIC_BE bytes at offset 0 → recognized as BE magic but rejected
-        // by the !little_endian guard (big-endian images not supported).
+    fn superblock_read_big_endian_image_returns_bad_magic() {
+        // BE squashfs on-disk bytes are [0x73, 0x71, 0x73, 0x68] = MAGIC_BE.to_le_bytes().
+        // from_le_bytes of those bytes == MAGIC_BE → rejected before any field reads.
         let mut data = vec![0u8; 200];
-        data[0..4].copy_from_slice(&MAGIC_BE.to_be_bytes());
+        data[0..4].copy_from_slice(&MAGIC_BE.to_le_bytes());
         let mut c = Cursor::new(data);
-        let result = Superblock::read(&mut c);
-        assert!(matches!(result, Err(Error::BadMagic)));
+        assert!(matches!(Superblock::read(&mut c), Err(Error::BadMagic)));
     }
 
     #[test]
-    fn detect_inner_big_endian_magic_returns_ok() {
-        // detect_inner accepts both LE and BE magic — it only checks bytes 0..4.
+    fn detect_inner_le_magic_accepted() {
+        // LE squashfs on-disk bytes are [0x68, 0x73, 0x71, 0x73] = MAGIC_LE.to_le_bytes().
         let mut data = vec![0u8; 4];
-        data[0..4].copy_from_slice(&MAGIC_BE.to_be_bytes());
+        data[0..4].copy_from_slice(&MAGIC_LE.to_le_bytes());
         let mut c = Cursor::new(data);
-        // detect_inner accepts be magic as Ok()
         assert!(matches!(detect_inner(&mut c), Ok(())));
+    }
+
+    #[test]
+    fn detect_inner_big_endian_image_rejected() {
+        // BE squashfs bytes yield from_le_bytes == MAGIC_BE ≠ MAGIC_LE → BadMagic.
+        let mut data = vec![0u8; 4];
+        data[0..4].copy_from_slice(&MAGIC_BE.to_le_bytes());
+        let mut c = Cursor::new(data);
+        assert!(matches!(detect_inner(&mut c), Err(Error::BadMagic)));
     }
 }
