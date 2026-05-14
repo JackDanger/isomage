@@ -11,9 +11,9 @@
 //!   EOCD locator + EOCD64 for archives > 4 GiB.
 //! - Central directory entry parsing: file name, compression method,
 //!   uncompressed/compressed size, local file header offset.
-//! - Stored (method 0) files get a `file_location` pointing at their raw
-//!   data so `cat_node` / `extract_node` can read them directly without
-//!   decompression.
+//! - Stored (method 0), unencrypted files get a `file_location` pointing at
+//!   their raw data so `cat_node` / `extract_node` can read them directly
+//!   without decompression.
 //! - Directory entries and path components are reconstructed from the
 //!   `/`-delimited names in the central directory.
 //! - ZIP file comments and extra-field extensions are skipped gracefully.
@@ -23,7 +23,9 @@
 //! - Deflate, Deflate64, LZMA, BZip2, ZStd decompression (planned, each
 //!   behind its own Cargo feature). Compressed entries appear in the tree
 //!   but `cat_node` returns an error for them until the feature lands.
-//! - Encryption (traditional PKWARE or WinZip AES).
+//! - Encryption (traditional PKWARE or WinZip AES). Encrypted entries appear
+//!   in the tree with size metadata, but `file_location` is suppressed so
+//!   `cat_node` returns an error rather than exposing ciphertext.
 //! - Multi-volume / split archives.
 
 use std::collections::HashMap;
@@ -269,6 +271,12 @@ fn local_data_offset<R: Read + Seek>(r: &mut R, lh_offset: u64) -> Option<u64> {
     let mut hdr = [0u8; 30];
     r.read_exact(&mut hdr).ok()?;
     if u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) != LFH_SIG {
+        return None;
+    }
+    // Defend against mismatched CD/LFH flags: if the LFH marks the entry as
+    // encrypted, suppress file_location regardless of what the CD said.
+    let lfh_flags = u16::from_le_bytes([hdr[6], hdr[7]]);
+    if lfh_flags & FLAG_ENCRYPTED != 0 {
         return None;
     }
     let name_len = u16::from_le_bytes([hdr[26], hdr[27]]) as u64;
@@ -538,12 +546,21 @@ mod tests {
     }
 
     fn make_stored_zip_with_flags(name: &[u8], data: &[u8], general_flags: u16) -> Vec<u8> {
+        make_stored_zip_with_split_flags(name, data, general_flags, general_flags)
+    }
+
+    fn make_stored_zip_with_split_flags(
+        name: &[u8],
+        data: &[u8],
+        lfh_flags: u16,
+        cd_flags: u16,
+    ) -> Vec<u8> {
         let mut z = Vec::new();
 
         let lh_offset = z.len() as u32;
         z.extend_from_slice(&LFH_SIG.to_le_bytes());
         z.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        z.extend_from_slice(&general_flags.to_le_bytes());
+        z.extend_from_slice(&lfh_flags.to_le_bytes());
         z.extend_from_slice(&METHOD_STORED.to_le_bytes());
         z.extend_from_slice(&0u32.to_le_bytes()); // mod time + date
         z.extend_from_slice(&0u32.to_le_bytes()); // CRC-32
@@ -558,7 +575,7 @@ mod tests {
         z.extend_from_slice(&CDR_SIG.to_le_bytes());
         z.extend_from_slice(&20u16.to_le_bytes()); // version made by
         z.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        z.extend_from_slice(&general_flags.to_le_bytes());
+        z.extend_from_slice(&cd_flags.to_le_bytes());
         z.extend_from_slice(&METHOD_STORED.to_le_bytes());
         z.extend_from_slice(&0u32.to_le_bytes()); // mod time + date
         z.extend_from_slice(&0u32.to_le_bytes()); // CRC-32
@@ -619,6 +636,21 @@ mod tests {
         assert!(
             file.file_location.is_none(),
             "encrypted stored entry should not expose raw ciphertext as file data"
+        );
+    }
+
+    #[test]
+    fn lfh_encrypted_flag_suppresses_file_location_even_when_cd_is_clear() {
+        // Malformed/unusual ZIP: CD says unencrypted, LFH says encrypted.
+        // The LFH check in local_data_offset must catch this and return None.
+        let zip = make_stored_zip_with_split_flags(b"tricky.txt", b"ciphertext", FLAG_ENCRYPTED, 0);
+        let mut c = Cursor::new(&zip);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        let file = root.find_node("tricky.txt").expect("tricky.txt exists");
+        assert_eq!(file.size, 10);
+        assert!(
+            file.file_location.is_none(),
+            "LFH-encrypted entry must not expose file_location even if CD flag is clear"
         );
     }
 
