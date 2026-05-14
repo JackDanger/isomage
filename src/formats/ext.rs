@@ -1525,4 +1525,248 @@ mod tests {
             "discontiguous blocks should yield no file_location"
         );
     }
+
+    // ── read_bgd with 64-bit descriptor ──────────────────────────────────────
+
+    #[test]
+    fn read_bgd_uses_64bit_inode_table_hi() {
+        // Superblock with INCOMPAT_64BIT and desc_size=64, 1KB blocks.
+        // bgd_table_offset = base_offset + (first_data_block + 1) * block_size
+        //                  = 0 + 2 * 1024 = 2048.
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_64BIT,
+            desc_size: 64,
+        };
+        // Image must be at least 2048 + 64 bytes.
+        let mut img = vec![0u8; 3072];
+        // Write the BGD at offset 2048:
+        //   inode_table_lo at bytes 8..12 → 5
+        //   inode_table_hi at bytes 40..44 → 2
+        img[2048 + 8..2048 + 12].copy_from_slice(&5u32.to_le_bytes());
+        img[2048 + 40..2048 + 44].copy_from_slice(&2u32.to_le_bytes());
+        let mut c = Cursor::new(img);
+        let bgd = read_bgd(&mut c, &sb, 0, 0).expect("read_bgd should succeed");
+        // inode_table = (2 << 32) | 5 = 8589934597
+        assert_eq!(bgd.inode_table, (2u64 << 32) | 5u64);
+    }
+
+    // ── parse_idx_entries ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_idx_entries_one_entry() {
+        // Build a buffer with one index entry at offset 12.
+        // Bytes 16..20 = leaf_lo = 7, bytes 20..22 = leaf_hi = 0.
+        let mut data = vec![0u8; 24];
+        // Header (bytes 0..12): magic + counts etc. — content ignored by this function.
+        data[16..20].copy_from_slice(&7u32.to_le_bytes()); // leaf_lo
+        data[20..22].copy_from_slice(&0u16.to_le_bytes()); // leaf_hi
+        let entries = parse_idx_entries(&data, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].leaf, 7);
+    }
+
+    #[test]
+    fn parse_idx_entries_overflow_breaks() {
+        // entries = 2 but buffer only has room for 1 → the second iteration
+        // hits `off + 12 > data.len()` and breaks.
+        let data = vec![0u8; 24]; // room for exactly one 12-byte entry at offset 12
+        let entries = parse_idx_entries(&data, 2);
+        assert_eq!(entries.len(), 1);
+    }
+
+    // ── collect_extents with internal node (depth > 0) ────────────────────────
+
+    #[test]
+    fn collect_extents_follows_internal_node_to_leaf() {
+        // Build a two-level extent tree in memory.
+        //
+        // Root node (i_block area, 60 bytes): depth=1, 1 index entry → child at block 3.
+        // Child block (block 3, offset 3*1024=3072): depth=0, 1 leaf entry → phys block 10.
+        //
+        // We need an image of at least 3072 + 1024 = 4096 bytes.
+        const BS: usize = 1024;
+        let mut img = vec![0u8; 5 * BS];
+
+        let em = EXTENT_MAGIC.to_le_bytes();
+
+        // Root node (60 bytes; only first 24 are relevant here).
+        let mut root = vec![0u8; 60];
+        root[0..2].copy_from_slice(&em); // magic
+        root[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        root[4..6].copy_from_slice(&4u16.to_le_bytes()); // max = 4
+        root[6..8].copy_from_slice(&1u16.to_le_bytes()); // depth = 1 (internal)
+                                                         // Index entry at bytes 12..24:
+                                                         //   ei_block at [12..16] = 0
+                                                         //   ei_leaf_lo at [16..20] = 3 (child is at block 3)
+                                                         //   ei_leaf_hi at [20..22] = 0
+        root[16..20].copy_from_slice(&3u32.to_le_bytes());
+
+        // Child block at offset 3 * BS = 3072:
+        img[3 * BS..3 * BS + 2].copy_from_slice(&em);
+        img[3 * BS + 2..3 * BS + 4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        img[3 * BS + 4..3 * BS + 6].copy_from_slice(&4u16.to_le_bytes()); // max = 4
+        img[3 * BS + 6..3 * BS + 8].copy_from_slice(&0u16.to_le_bytes()); // depth = 0 (leaf)
+                                                                          // Leaf entry at bytes 12..24:
+                                                                          //   ee_block at [12..16] = 0
+                                                                          //   ee_len at [16..18] = 1 (1 block, not unwritten)
+                                                                          //   ee_start_hi at [18..20] = 0
+                                                                          //   ee_start_lo at [20..24] = 10
+        img[3 * BS + 16..3 * BS + 18].copy_from_slice(&1u16.to_le_bytes()); // ee_len = 1
+        img[3 * BS + 20..3 * BS + 24].copy_from_slice(&10u32.to_le_bytes()); // phys = 10
+
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(img);
+        let extents = collect_extents(&mut c, &sb, 0, &root, 5).expect("collect_extents");
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].phys, 10);
+        assert_eq!(extents[0].len, 1);
+        assert!(!extents[0].unwritten);
+    }
+
+    // ── single_run_location edge cases ────────────────────────────────────────
+
+    #[test]
+    fn single_run_location_returns_none_for_empty_inode() {
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 0,
+            flags: 0,
+            i_block: [0; 15],
+        };
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let loc = single_run_location(&mut c, &sb, 0, &inode).unwrap();
+        assert!(loc.is_none());
+    }
+
+    #[test]
+    fn single_run_location_returns_none_for_inline_inode() {
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 10,
+            flags: EXT4_INLINE_DATA_FL,
+            i_block: [0; 15],
+        };
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let loc = single_run_location(&mut c, &sb, 0, &inode).unwrap();
+        assert!(loc.is_none());
+    }
+
+    #[test]
+    fn single_run_location_extent_unwritten_returns_none() {
+        // Build an inode with EXT4_EXTENTS_FL and a single UNWRITTEN extent.
+        // single_run_location should return None because unwritten extents
+        // contain stale on-disk data.
+        let em = EXTENT_MAGIC.to_le_bytes();
+        let mut i_block_bytes = [0u8; 60];
+        i_block_bytes[0..2].copy_from_slice(&em); // magic
+        i_block_bytes[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        i_block_bytes[4..6].copy_from_slice(&4u16.to_le_bytes()); // max
+        i_block_bytes[6..8].copy_from_slice(&0u16.to_le_bytes()); // depth = 0 (leaf)
+                                                                  // Leaf entry: ee_len = 0x8001 (unwritten flag in high bit + len=1)
+        i_block_bytes[16..18].copy_from_slice(&0x8001u16.to_le_bytes()); // unwritten
+        i_block_bytes[20..24].copy_from_slice(&5u32.to_le_bytes()); // phys = 5
+
+        // Convert bytes to i_block [u32; 15].
+        let mut i_block = [0u32; 15];
+        for (i, slot) in i_block.iter_mut().enumerate() {
+            let off = i * 4;
+            *slot = u32::from_le_bytes(i_block_bytes[off..off + 4].try_into().unwrap());
+        }
+
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 1024,
+            flags: EXT4_EXTENTS_FL,
+            i_block,
+        };
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let loc = single_run_location(&mut c, &sb, 0, &inode).unwrap();
+        assert!(loc.is_none(), "unwritten extent should yield no location");
+    }
+
+    #[test]
+    fn collect_extents_bad_magic_returns_empty() {
+        // node_data with bad magic → parse_extent_header returns None → empty vec.
+        let data = vec![0u8; 60]; // all zeros, magic = 0x0000 ≠ EXTENT_MAGIC
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let extents = collect_extents(&mut c, &sb, 0, &data, 5).unwrap();
+        assert!(extents.is_empty());
+    }
+
+    #[test]
+    fn collect_extents_remaining_depth_zero_returns_empty() {
+        // A node with depth=1 (internal) but remaining_depth=0 → safety cap, returns empty.
+        let em = EXTENT_MAGIC.to_le_bytes();
+        let mut data = vec![0u8; 60];
+        data[0..2].copy_from_slice(&em); // magic
+        data[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries = 1
+        data[6..8].copy_from_slice(&1u16.to_le_bytes()); // depth = 1 (internal)
+
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: 0,
+            desc_size: 32,
+        };
+        let mut c = Cursor::new(vec![0u8; 0]);
+        let extents = collect_extents(&mut c, &sb, 0, &data, 0).unwrap();
+        assert!(extents.is_empty());
+    }
+
+    #[test]
+    fn parse_leaf_extents_overflow_breaks() {
+        // entries=3 but data only has room for 2 entries after the header (36 bytes).
+        // Third iteration: off = 12 + 2*12 = 36, off+12 = 48 > 36 → break.
+        let mut data = vec![0u8; 36]; // header (12) + 2 entries (24) = 36 bytes
+                                      // Fill the two valid entries.
+        data[16..18].copy_from_slice(&1u16.to_le_bytes()); // ee_len for entry 0
+        data[28..30].copy_from_slice(&1u16.to_le_bytes()); // ee_len for entry 1
+        let extents = parse_leaf_extents(&data, 3);
+        assert_eq!(extents.len(), 2, "should stop at 2 due to buffer overflow");
+    }
 }
