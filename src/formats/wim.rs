@@ -787,6 +787,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_xml_image_tag_no_closing_angle_bracket() {
+        // <IMAGE with no '>' → find('>') returns None → break (line 295).
+        let xml = r#"<IMAGE INDEX="1" truncated here without end"#;
+        let entries = parse_xml(xml);
+        assert!(
+            entries.is_empty(),
+            "IMAGE tag with no '>' should yield no entries"
+        );
+    }
+
     // ── read_header edge cases ────────────────────────────────────────────────
 
     #[test]

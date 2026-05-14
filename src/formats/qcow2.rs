@@ -552,4 +552,26 @@ mod tests {
         assert!(Error::UnsupportedVersion(2).source().is_none());
         assert!(Error::BadClusterBits(5).source().is_none());
     }
+
+    #[test]
+    fn error_from_io_error() {
+        let e = Error::from(io::Error::other("qcow2 test"));
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn read_header_too_short_returns_error() {
+        // Empty buffer → read_exact fails with UnexpectedEof → TooShort.
+        let data: &[u8] = &[];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn read_header_bad_magic_returns_error() {
+        // HEADER_SIZE bytes of zeros: magic=0 ≠ QCOW2_MAGIC → BadMagic.
+        let data = vec![0u8; HEADER_SIZE];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::BadMagic)));
+    }
 }

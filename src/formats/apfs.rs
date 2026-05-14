@@ -620,4 +620,35 @@ mod tests {
         assert_eq!(nx.fs_oids[0], 1);
         assert_eq!(nx.fs_oids[1], 2);
     }
+
+    #[test]
+    fn error_from_io_error() {
+        let io = std::io::Error::other("apfs read failed");
+        let e = Error::from(io);
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn read_nx_superblock_magic_too_short_returns_error() {
+        // 34 bytes: seek to offset 32 succeeds, but read_exact(4) gets only 2 bytes → TooShort.
+        let data = vec![0u8; 34];
+        let mut c = Cursor::new(data);
+        assert!(matches!(
+            read_nx_superblock(&mut c),
+            Err(Error::TooShort)
+        ));
+    }
+
+    #[test]
+    fn read_nx_superblock_block_size_too_short_returns_error() {
+        // 38 bytes: magic at [32..36] is correct, seek to block_size at 36 succeeds,
+        // but read_exact(4) from position 36 can only read 2 bytes → TooShort.
+        let mut data = vec![0u8; 38];
+        data[32..36].copy_from_slice(&NXSB_MAGIC.to_le_bytes());
+        let mut c = Cursor::new(data);
+        assert!(matches!(
+            read_nx_superblock(&mut c),
+            Err(Error::TooShort)
+        ));
+    }
 }

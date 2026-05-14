@@ -655,4 +655,42 @@ mod tests {
         assert!(Error::BadMagic.source().is_none());
         assert!(Error::BadVersion(4).source().is_none());
     }
+
+    #[test]
+    fn error_from_io_error() {
+        let e = Error::from(io::Error::other("dmg test"));
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn read_koly_too_short_returns_error() {
+        // Less than KOLY_SIZE (512) bytes → file_len < 512 → TooShort.
+        let data = vec![0u8; 100];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_koly(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn parse_plist_xml_no_array_after_blkx_key() {
+        // <key>blkx</key> present but no <array> follows → None at line 261 → empty.
+        let xml = "<key>blkx</key><key>something_else</key>";
+        let entries = parse_plist_xml(xml);
+        assert!(entries.is_empty(), "no <array> → should return empty");
+    }
+
+    #[test]
+    fn parse_plist_xml_no_closing_array_tag() {
+        // <array> found but no </array> → None at line 265 → empty.
+        let xml = "<key>blkx</key><array><dict><key>CFName</key><string>EFI</string></dict>";
+        let entries = parse_plist_xml(xml);
+        assert!(entries.is_empty(), "no </array> → should return empty");
+    }
+
+    #[test]
+    fn parse_plist_xml_no_closing_dict_tag() {
+        // <dict> found but no </dict> within the array body → break at line 276 → empty.
+        let xml = "<key>blkx</key><array><dict><key>CFName</key><string>EFI</string></array>";
+        let entries = parse_plist_xml(xml);
+        assert!(entries.is_empty(), "unclosed <dict> → should return empty");
+    }
 }

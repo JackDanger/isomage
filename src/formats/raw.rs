@@ -222,6 +222,51 @@ mod tests {
     /// Protective MBR + valid GPT header. We exercise the fall-through
     /// chain: GPT tries first and succeeds.
     #[test]
+    fn error_from_io_error() {
+        let e = Error::from(std::io::Error::other("raw test"));
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn gpt_unsupported_entry_size_propagates_as_raw_error() {
+        // GPT signature present but entry_size=64 → UnsupportedEntrySize propagates via line 73.
+        let mut img = vec![0u8; 8192];
+        let h = 512;
+        img[h..h + 8].copy_from_slice(b"EFI PART");
+        img[h + 80..h + 84].copy_from_slice(&128u32.to_le_bytes()); // num_entries
+        img[h + 84..h + 88].copy_from_slice(&64u32.to_le_bytes());  // entry_size < 128
+        let path = scratch(&img, "gpt-badentry");
+        let mut f = File::open(&path).unwrap();
+        let result = detect_and_parse(&mut f);
+        std::fs::remove_file(&path).ok();
+        assert!(
+            matches!(result, Err(Error::Gpt(_))),
+            "should propagate GPT error; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn protective_mbr_propagates_as_raw_error() {
+        // A 512-byte file with a protective-MBR signature: one entry of type 0xEE.
+        // GPT fails with TooShort (file has no LBA 1); MBR returns ProtectiveMbr.
+        let mut sector = vec![0u8; 512];
+        sector[0x1FE] = 0x55;
+        sector[0x1FF] = 0xAA;
+        // Slot 0: type_code=0xEE, LBA start=1, LBA count=0xFFFFFFFF.
+        sector[0x1C2] = 0xEE;
+        sector[0x1C6..0x1CA].copy_from_slice(&1u32.to_le_bytes());
+        sector[0x1CA..0x1CE].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        let path = scratch(&sector, "prot-mbr");
+        let mut f = File::open(&path).unwrap();
+        let result = detect_and_parse(&mut f);
+        std::fs::remove_file(&path).ok();
+        assert!(
+            matches!(result, Err(Error::Mbr(mbr::Error::ProtectiveMbr))),
+            "should propagate ProtectiveMbr; got {result:?}"
+        );
+    }
+
+    #[test]
     fn gpt_path_taken_when_signature_present() {
         let mut img = vec![0u8; 32 * 1024]; // 32 KiB
 

@@ -517,4 +517,27 @@ mod tests {
             "cursor should be restored on failure"
         );
     }
+
+    #[test]
+    fn error_from_io_error() {
+        let io = std::io::Error::other("vmdk read failed");
+        let e = Error::from(io);
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn read_header_too_short_returns_error() {
+        // 200 bytes: seek to 0 succeeds, but read_exact(512) gets UnexpectedEof → TooShort.
+        let data = vec![0u8; 200];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn read_header_bad_magic_returns_error() {
+        // 512 bytes of zeros: magic is 0, not VMDK_MAGIC → BadMagic.
+        let data = vec![0u8; 512];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::BadMagic)));
+    }
 }
