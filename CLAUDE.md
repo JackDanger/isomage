@@ -32,8 +32,8 @@ the only artifact is the crate on crates.io and its rustdoc on docs.rs.
 
 ## Hard rules, read first
 
-1. **Promptlog gate.** If your changes touch any file under `src/`
-   or `Cargo.toml`, you **MUST** add a new file at
+1. **Promptlog gate.** If your changes touch any file under `src/`,
+   `tests/`, or `scripts/`, you **MUST** add a new file at
    `prompts/YYYYMMDD-HHMMSS-<slug>.md` before opening a pull
    request. The `prompt-log` job in `.github/workflows/ci.yml`
    fails the PR otherwise. Treat it the same as "tests must pass."

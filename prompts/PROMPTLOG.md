@@ -244,7 +244,7 @@ CI will pass on the second push.
 `.github/workflows/ci.yml` runs a `prompt-log` job on every pull request.
 It fails the PR when:
 
-- The PR adds, changes, or modifies any file under `src/` or the top-level `Cargo.toml`, **and**
+- The PR adds, changes, or modifies any file under `src/`, `tests/`, or `scripts/`, **and**
 - The PR does not add a new file under `prompts/`
 
 The exact watched paths are defined by `WATCH_REGEX` in
