@@ -1521,4 +1521,546 @@ mod tests {
         let buf = make_fe_buf(261, 1, &ad);
         assert!(get_file_allocation(&buf).is_err());
     }
+
+    // ── get_file_allocation: zero-length and fallback paths ───────────────────
+
+    #[test]
+    fn file_alloc_short_ad_zero_length_breaks() {
+        // Short AD with all-zero bytes → raw_length=0 → extent_type=0, length=0 → break.
+        // No extents recorded → Err.
+        let ad = vec![0u8; 8];
+        let buf = make_fe_buf(261, 0, &ad);
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    #[test]
+    fn file_alloc_long_ad_zero_length_breaks() {
+        // Long AD with all-zero bytes → raw_length=0 → length=0 → break.
+        let ad = vec![0u8; 16];
+        let buf = make_fe_buf(261, 1, &ad);
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    #[test]
+    fn file_alloc_fallback_unknown_ad_type() {
+        // ad_type=2 hits the fallback _ branch: reads 8 bytes at ad_offset as a short AD.
+        let mut ad = vec![0u8; 8];
+        w32(&mut ad, 0, 512u32); // length = 512
+        w32(&mut ad, 4, 5u32); // location = 5
+        let buf = make_fe_buf(261, 2, &ad);
+        let alloc = get_file_allocation(&buf).expect("fallback should succeed");
+        assert_eq!(alloc.extents.len(), 1);
+        assert_eq!(alloc.extents[0].length, 512);
+    }
+
+    // ── parse_directory: extent-based root dir, verbose paths ─────────────────
+
+    /// Build a UDF image where the root directory FE uses short ADs
+    /// (not inline), with FID data stored in a separate sector.
+    fn make_udf_image_extent_dir() -> Vec<u8> {
+        let mut img = vec![0u8; S * 270];
+
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+
+        w16(&mut img, 256 * S, 2);
+        w32(&mut img, 256 * S + 16, (3 * S) as u32);
+        w32(&mut img, 256 * S + 20, 257);
+
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+
+        w16(&mut img, 258 * S, 6);
+        w32(&mut img, 258 * S + 248, S as u32);
+        w32(&mut img, 258 * S + 252, 0);
+        w16(&mut img, 258 * S + 256, 0);
+
+        w16(&mut img, 259 * S, 8);
+
+        // FSD at 260: root ICB at location=1 → sector 261
+        w16(&mut img, 260 * S, 256);
+        w32(&mut img, 260 * S + 400, S as u32);
+        w32(&mut img, 260 * S + 404, 1);
+        w16(&mut img, 260 * S + 408, 0);
+
+        // Root FE at 261: SHORT AD, extent at location=3 → sector 263
+        let fid_data = make_fid_data();
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 0); // ICB flags: short AD
+        w32(&mut img, rfe + 168, 0); // EA length = 0
+        w32(&mut img, rfe + 172, 8); // AD length = 8 (one short AD)
+        w32(&mut img, rfe + 176, fid_data.len() as u32); // extent length
+        w32(&mut img, rfe + 180, 3); // location = 3 → sector 263
+
+        // FID data at sector 263
+        let fid_sec = 263 * S;
+        img[fid_sec..fid_sec + fid_data.len()].copy_from_slice(&fid_data);
+
+        // "hello.txt" FE at sector 262 (location=2): inline
+        let hfe = 262 * S;
+        let content = b"Hi!";
+        w16(&mut img, hfe, 261);
+        w16(&mut img, hfe + 18, 3);
+        w32(&mut img, hfe + 172, content.len() as u32);
+        img[hfe + 176..hfe + 176 + content.len()].copy_from_slice(content);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_extent_based_root_dir_verbose() {
+        // verbose=true exercises lines 604-609 (extent-based dir verbose) and
+        // lines 616-627 (reading extents into buffer).
+        let img = make_udf_image_extent_dir();
+        let mut c = Cursor::new(img);
+        let root = parse_udf_verbose(&mut c, true).expect("extent-based dir should succeed");
+        assert!(root.find_node("/hello.txt").is_some());
+    }
+
+    // ── parse_directory: bad tag_id in FID data (verbose warning) ─────────────
+
+    fn make_udf_image_bad_tag_in_fid() -> Vec<u8> {
+        let mut img = make_udf_image();
+
+        let mut fids = Vec::new();
+
+        // Parent FID (40 bytes)
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        fids.extend_from_slice(&parent);
+
+        // Entry with tag_id=99 (not 0 or 257) — 40 bytes
+        let mut bad = vec![0u8; 40];
+        w16(&mut bad, 0, 99);
+        fids.extend_from_slice(&bad);
+
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_bad_tag_in_fid_verbose() {
+        // verbose=true: hits "Warning: Expected FID (257) at offset X, found 99".
+        let img = make_udf_image_bad_tag_in_fid();
+        let mut c = Cursor::new(img);
+        let root = parse_udf_verbose(&mut c, true).expect("parse should succeed despite bad tag");
+        assert_eq!(root.name, "/");
+    }
+
+    // ── parse_directory: FID name offset out of bounds (verbose) ─────────────
+
+    fn make_udf_image_fid_name_oob() -> Vec<u8> {
+        let mut img = make_udf_image();
+
+        let mut fids = Vec::new();
+
+        // Parent FID (40 bytes)
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        fids.extend_from_slice(&parent);
+
+        // A 40-byte FID where tag_id=257, file_char=0, length_of_fi=200 (name overflows).
+        // name_offset = 40+38+0 = 78, 78+200=278 > fids.len()=80 → OOB.
+        let mut bad_fid = vec![0u8; 40];
+        w16(&mut bad_fid, 0, 257);
+        bad_fid[18] = 0x00; // not parent, not deleted
+        bad_fid[19] = 200; // length_of_fi=200 but no name bytes follow
+                           // len_iu at [36..38] = 0
+        fids.extend_from_slice(&bad_fid);
+
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_fid_name_oob_verbose() {
+        // verbose=true: hits "Warning: FID name offset out of bounds".
+        let img = make_udf_image_fid_name_oob();
+        let mut c = Cursor::new(img);
+        let root = parse_udf_verbose(&mut c, true).expect("parse should succeed");
+        assert_eq!(root.name, "/");
+    }
+
+    // ── parse_directory: subdirectory with bad FE (verbose error path) ────────
+
+    fn make_udf_image_subdir_bad_fe() -> Vec<u8> {
+        let mut img = make_udf_image();
+
+        let mut fids = Vec::new();
+
+        // Parent FID (40 bytes)
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        fids.extend_from_slice(&parent);
+
+        // Directory FID: is_directory=0x02, ICB location=3 → sector 263 (all zeros → bad FE).
+        let name_raw = [8u8, b's', b'u', b'b']; // CS0 "sub"
+        let len_fi = name_raw.len() as u8;
+        let total = 38 + name_raw.len();
+        let padded = (total + 3) & !3;
+        let mut dir_fid = vec![0u8; padded];
+        w16(&mut dir_fid, 0, 257);
+        dir_fid[18] = 0x02; // is_directory
+        dir_fid[19] = len_fi;
+        w32(&mut dir_fid, 20, S as u32);
+        w32(&mut dir_fid, 24, 3); // location=3 → sector 263 (all zeros)
+        w16(&mut dir_fid, 28, 0);
+        dir_fid[38..38 + name_raw.len()].copy_from_slice(&name_raw);
+        fids.extend_from_slice(&dir_fid);
+
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_subdir_bad_fe_verbose() {
+        // verbose=true: hits "Warning: Failed to parse subdirectory: ..." and adds dir node.
+        // Lines 688-695: is_directory branch, parse_directory Err path, add_child.
+        let img = make_udf_image_subdir_bad_fe();
+        let mut c = Cursor::new(img);
+        let root = parse_udf_verbose(&mut c, true).expect("parse should succeed");
+        // "sub" directory node is added even though its FE is bad.
+        assert!(root
+            .children
+            .iter()
+            .any(|c| c.name == "sub" && c.is_directory));
+    }
+
+    // ── LVD partition maps: type-2 map verbose path ───────────────────────────
+
+    /// Build a UDF image where the LVD has a type-2 partition map
+    /// (not a metadata partition), exercising lines 249-307.
+    fn make_udf_image_with_type2_map() -> Vec<u8> {
+        let mut img = vec![0u8; S * 270];
+
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+
+        w16(&mut img, 256 * S, 2);
+        w32(&mut img, 256 * S + 16, (3 * S) as u32);
+        w32(&mut img, 256 * S + 20, 257);
+
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+
+        // LVD at 258 with type-2 partition map
+        let lvd = 258 * S;
+        w16(&mut img, lvd, 6);
+        w32(&mut img, lvd + 248, S as u32);
+        w32(&mut img, lvd + 252, 0); // FSD location=0
+        w16(&mut img, lvd + 256, 0);
+        // MapTableLength = 64, NumPartitionMaps = 1
+        w32(&mut img, lvd + 264, 64); // MapTableLength
+        w32(&mut img, lvd + 268, 1); // NumPartitionMaps
+                                     // Type-2 map at offset 440: type=2, length=64, id starting at offset 5
+        img[lvd + 440] = 2; // map_type=2
+        img[lvd + 441] = 64; // map_length=64
+                             // Identifier at map+5..map+28 (not "*UDF Metadata Partition")
+        img[lvd + 445..lvd + 458].copy_from_slice(b"*Custom Map  ");
+
+        w16(&mut img, 259 * S, 8);
+
+        // FSD at 260: root ICB at location=1 → sector 261
+        w16(&mut img, 260 * S, 256);
+        w32(&mut img, 260 * S + 400, S as u32);
+        w32(&mut img, 260 * S + 404, 1);
+        w16(&mut img, 260 * S + 408, 0);
+
+        // Root FE at 261: inline (parent FID only)
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        w32(&mut img, rfe + 172, parent.len() as u32);
+        img[rfe + 176..rfe + 216].copy_from_slice(&parent);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_lvd_type2_map_verbose() {
+        // verbose=true exercises lines 249-307 (partition map loop) and
+        // specifically the type-2 map path (lines 265-305) with a non-metadata id.
+        let img = make_udf_image_with_type2_map();
+        let mut c = Cursor::new(img);
+        let root = parse_udf_verbose(&mut c, true).expect("type-2 map should not error");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn parse_udf_lvd_type2_map_non_verbose() {
+        // Same image without verbose to ensure non-verbose path works too.
+        let img = make_udf_image_with_type2_map();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("type-2 map should not error");
+        assert_eq!(root.name, "/");
+    }
+
+    // ── get_file_allocation: fallback AD zero-length path ─────────────────────
+
+    #[test]
+    fn file_alloc_fallback_zero_length_extent() {
+        // ad_type=2, zero-length 8-byte AD: ext.length=0 → skipped → no extents → Err.
+        // Covers line 569 (closing `}` of `if ext.length > 0`).
+        let ad = vec![0u8; 8];
+        let buf = make_fe_buf(261, 2, &ad);
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    #[test]
+    fn file_alloc_fallback_too_short_for_extent() {
+        // ad_type=2 (fallback), fe_buffer.len()=180 < ad_offset(176)+8=184
+        // → if-condition FALSE → body skipped → no extents → Err.
+        let mut buf = vec![0u8; 180];
+        w16(&mut buf, 0, 261); // tag_id=261
+        w16(&mut buf, 18, 2); // ad_type=2 (fallback branch)
+                              // ea_length=0 at 168, ad_length=0 at 172 → ad_offset=176, ad_length=0
+                              // 176+8=184 > 180 → condition FALSE, body skipped
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    // ── parse_directory: short FID tail (line 633) ────────────────────────────
+
+    fn make_udf_image_short_fid_tail() -> Vec<u8> {
+        let mut img = make_udf_image();
+
+        // Parent FID (40 bytes) + 10 trailing zeros = 50 bytes total.
+        // After parent, offset=40, buffer.len()=50, 40+40=80 > 50 → break (line 633).
+        let mut fids = vec![0u8; 50];
+        w16(&mut fids, 0, 257); // tag_id=257 (FID)
+        fids[18] = 0x08; // PARENT flag
+
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_short_fid_tail_breaks_early() {
+        // Exercises line 633: `offset + 40 > buffer.len()` → break.
+        let img = make_udf_image_short_fid_tail();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("short tail should succeed");
+        assert!(root.children.is_empty());
+    }
+
+    // ── parse_directory: valid subdirectory (line 694) ────────────────────────
+
+    fn make_udf_image_with_subdir() -> Vec<u8> {
+        let mut img = make_udf_image();
+
+        let mut fids = Vec::new();
+
+        // Parent FID (40 bytes)
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        fids.extend_from_slice(&parent);
+
+        // Directory FID: is_directory=0x02, ICB location=3 → sector 263
+        let name_raw = [8u8, b'm', b'y', b'd', b'i', b'r'];
+        let len_fi = name_raw.len() as u8;
+        let total = 38 + name_raw.len();
+        let padded = (total + 3) & !3;
+        let mut dir_fid = vec![0u8; padded];
+        w16(&mut dir_fid, 0, 257);
+        dir_fid[18] = 0x02; // is_directory
+        dir_fid[19] = len_fi;
+        w32(&mut dir_fid, 20, S as u32);
+        w32(&mut dir_fid, 24, 3); // location=3 → sector 263
+        w16(&mut dir_fid, 28, 0);
+        dir_fid[38..38 + name_raw.len()].copy_from_slice(&name_raw);
+        fids.extend_from_slice(&dir_fid);
+
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        w32(&mut img, rfe + 172, fids.len() as u32);
+        img[rfe + 176..rfe + 176 + fids.len()].copy_from_slice(&fids);
+
+        // Valid empty subdir FE at sector 263
+        let dir_fe = 263 * S;
+        w16(&mut img, dir_fe, 261);
+        w16(&mut img, dir_fe + 18, 3); // inline
+        let mut sub_parent = vec![0u8; 40];
+        w16(&mut sub_parent, 0, 257);
+        sub_parent[18] = 0x08;
+        w32(&mut img, dir_fe + 172, sub_parent.len() as u32);
+        img[dir_fe + 176..dir_fe + 216].copy_from_slice(&sub_parent);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_valid_subdir_success_path() {
+        // parse_directory for "mydir" returns Ok → line 694 (`}` of if-let Err
+        // when Err does not occur) is covered by the success fall-through.
+        let img = make_udf_image_with_subdir();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("valid subdir should parse");
+        assert!(root
+            .children
+            .iter()
+            .any(|c| c.name == "mydir" && c.is_directory));
+    }
+
+    // ── LVD partition maps: zero map_length break and unknown VDS tag ─────────
+
+    fn make_udf_image_zero_map_length() -> Vec<u8> {
+        let mut img = vec![0u8; S * 270];
+
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+
+        w16(&mut img, 256 * S, 2);
+        w32(&mut img, 256 * S + 16, (3 * S) as u32);
+        w32(&mut img, 256 * S + 20, 257);
+
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+
+        let lvd = 258 * S;
+        w16(&mut img, lvd, 6);
+        w32(&mut img, lvd + 248, S as u32);
+        w32(&mut img, lvd + 252, 0);
+        w16(&mut img, lvd + 256, 0);
+        w32(&mut img, lvd + 264, 8); // MapTableLength=8
+        w32(&mut img, lvd + 268, 1); // NumPartitionMaps=1
+                                     // Map at offset 440: type=2, length=0 → triggers zero-length break (line 255)
+        img[lvd + 440] = 2; // map_type=2
+        img[lvd + 441] = 0; // map_length=0 → break
+
+        w16(&mut img, 259 * S, 8);
+
+        w16(&mut img, 260 * S, 256);
+        w32(&mut img, 260 * S + 400, S as u32);
+        w32(&mut img, 260 * S + 404, 1);
+        w16(&mut img, 260 * S + 408, 0);
+
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        w32(&mut img, rfe + 172, parent.len() as u32);
+        img[rfe + 176..rfe + 216].copy_from_slice(&parent);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_lvd_zero_map_length_breaks() {
+        // LVD has NumPartitionMaps=1, map_length=0 → break at line 255.
+        let img = make_udf_image_zero_map_length();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("zero map_length should not error");
+        assert_eq!(root.name, "/");
+    }
+
+    fn make_udf_image_unknown_vds_tag() -> Vec<u8> {
+        let mut img = vec![0u8; S * 270];
+
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+
+        w16(&mut img, 256 * S, 2);
+        w32(&mut img, 256 * S + 16, (4 * S) as u32); // 4 sectors in VDS
+        w32(&mut img, 256 * S + 20, 257);
+
+        // Sector 257: PD
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+
+        // Sector 258: unknown tag_id=7 → hits `_ => {}` (line 316)
+        w16(&mut img, 258 * S, 7);
+
+        // Sector 259: LVD — FSD at location=1 in partition 0 → sector 261
+        let lvd = 259 * S;
+        w16(&mut img, lvd, 6);
+        w32(&mut img, lvd + 248, S as u32);
+        w32(&mut img, lvd + 252, 1); // FSD location=1 → sector 261
+        w16(&mut img, lvd + 256, 0);
+
+        // Sector 260: TD
+        w16(&mut img, 260 * S, 8);
+
+        // FSD at sector 261 (partition 0, location=1 → absolute 261): root ICB location=2 → sector 262
+        w16(&mut img, 261 * S, 256);
+        w32(&mut img, 261 * S + 400, S as u32);
+        w32(&mut img, 261 * S + 404, 2); // location=2 → sector 262
+        w16(&mut img, 261 * S + 408, 0);
+
+        // Root FE at sector 262 (inline, empty dir)
+        let rfe = 262 * S;
+        w16(&mut img, rfe, 261);
+        w16(&mut img, rfe + 18, 3);
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257);
+        parent[18] = 0x08;
+        w32(&mut img, rfe + 172, parent.len() as u32);
+        img[rfe + 176..rfe + 216].copy_from_slice(&parent);
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_unknown_vds_tag_passes_through() {
+        // Sector 258 has tag_id=7 → hits `_ => {}` in VDS match (line 316).
+        let img = make_udf_image_unknown_vds_tag();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("unknown VDS tag should be ignored");
+        assert_eq!(root.name, "/");
+    }
+
+    // ── LVD type-2 map with non-printable byte in identifier (line 276) ───────
+
+    fn make_udf_image_type2_map_nonprintable() -> Vec<u8> {
+        let mut img = make_udf_image_with_type2_map();
+
+        // Replace the id_string at LVD[445..458] with one containing a
+        // non-printable byte (\x01), triggering line 276 ('.' replacement).
+        let lvd = 258 * S;
+        img[lvd + 445..lvd + 458].copy_from_slice(b"*Cust\x01m Map  ");
+
+        img
+    }
+
+    #[test]
+    fn parse_udf_type2_map_nonprintable_verbose() {
+        // verbose=true: id_string has \x01 → `.` substitution (line 276).
+        let img = make_udf_image_type2_map_nonprintable();
+        let mut c = Cursor::new(img);
+        let root = parse_udf_verbose(&mut c, true).expect("non-printable id should succeed");
+        assert_eq!(root.name, "/");
+    }
 }
