@@ -140,19 +140,26 @@ mod tests {
     // A trivial RandomAccessMut impl to exercise the default is_empty().
     struct InMemoryMut<'a>(&'a [u8]);
     impl<'a> RandomAccessMut for InMemoryMut<'a> {
-        fn len(&self) -> u64 { self.0.len() as u64 }
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
         fn read_at_mut(&mut self, offset: u64, len: usize) -> io::Result<&[u8]> {
             let off = offset as usize;
-            self.0.get(off..off+len).ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "eof"))
+            self.0
+                .get(off..off + len)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "eof"))
         }
     }
 
     #[test]
     fn random_access_mut_default_is_empty() {
-        let mut empty = InMemoryMut(b"");
+        let empty = InMemoryMut(b"");
         assert!(empty.is_empty(), "empty slice → is_empty() should be true");
         let mut nonempty = InMemoryMut(b"xy");
-        assert!(!nonempty.is_empty(), "non-empty slice → is_empty() should be false");
+        assert!(
+            !nonempty.is_empty(),
+            "non-empty slice → is_empty() should be false"
+        );
         assert_eq!(nonempty.read_at_mut(0, 2).unwrap(), b"xy");
     }
 }

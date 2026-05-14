@@ -1310,7 +1310,7 @@ mod tests {
         // First (skip) block: header = size=4 | 0x8000 = 0x8004.
         data.extend_from_slice(&0x8004u16.to_le_bytes()); // uncompressed, size=4
         data.extend_from_slice(&[0xAAu8; 4]); // 4 bytes of skipped content
-        // Target block: uncompressed, size=8, content = 8 zeros.
+                                              // Target block: uncompressed, size=8, content = 8 zeros.
         data.extend_from_slice(&0x8008u16.to_le_bytes()); // uncompressed, size=8
         data.extend_from_slice(&[0xBBu8; 8]);
         let mut c = Cursor::new(&data);

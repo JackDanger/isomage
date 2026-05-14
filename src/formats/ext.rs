@@ -1824,8 +1824,8 @@ mod tests {
             ino[4..8].copy_from_slice(&(BS as u32).to_le_bytes()); // size=1024
             ino[26..28].copy_from_slice(&2u16.to_le_bytes());
             ino[32..36].copy_from_slice(&0u32.to_le_bytes()); // no extents
-            // i_block[0..12] = 0 (no direct blocks)
-            // i_block[12] = SI_BLK (single-indirect pointer block)
+                                                              // i_block[0..12] = 0 (no direct blocks)
+                                                              // i_block[12] = SI_BLK (single-indirect pointer block)
             let si_offset = 40 + 12 * 4;
             ino[si_offset..si_offset + 4].copy_from_slice(&(SI_BLK as u32).to_le_bytes());
         }
@@ -1910,7 +1910,7 @@ mod tests {
         ea[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries=1
         ea[4..6].copy_from_slice(&4u16.to_le_bytes()); // max=4
         ea[6..8].copy_from_slice(&0u16.to_le_bytes()); // depth=0 (leaf)
-        // Leaf extent at offset 12: ee_block=0, ee_len=1, phys=DIR_DATA_BLK.
+                                                       // Leaf extent at offset 12: ee_block=0, ee_len=1, phys=DIR_DATA_BLK.
         ea[12..16].copy_from_slice(&0u32.to_le_bytes());
         ea[16..18].copy_from_slice(&1u16.to_le_bytes()); // ee_len=1
         ea[18..20].copy_from_slice(&0u16.to_le_bytes()); // ee_start_hi
@@ -2002,7 +2002,10 @@ mod tests {
         let mut c = cursor_of(&img);
         let root = detect_and_parse(&mut c).expect("image with device inode should parse");
         // Device inode is silently skipped → should not appear in tree.
-        assert!(root.find_node("/devnode").is_none(), "device inode should be skipped");
+        assert!(
+            root.find_node("/devnode").is_none(),
+            "device inode should be skipped"
+        );
         // Regular file is still present.
         assert!(root.find_node("/hello.txt").is_some());
     }
@@ -2056,7 +2059,12 @@ mod tests {
         }
         i_block[12] = 13; // SI block (all zeros → no extra blocks)
         i_block[13] = 14; // DI-L1 block
-        let inode = Inode { mode: S_IFREG, size: 12289, flags: 0, i_block };
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 12289,
+            flags: 0,
+            i_block,
+        };
 
         let mut c = Cursor::new(img);
         let blocks = collect_classical_blocks(&mut c, &sb, 0, &inode, 12289).unwrap();
@@ -2101,7 +2109,12 @@ mod tests {
         }
         // SI=0, DI=0 → neither adds blocks; proceeds to TI.
         i_block[14] = 17; // TI-L1 block
-        let inode = Inode { mode: S_IFREG, size: 12289, flags: 0, i_block };
+        let inode = Inode {
+            mode: S_IFREG,
+            size: 12289,
+            flags: 0,
+            i_block,
+        };
 
         let mut c = Cursor::new(img);
         let blocks = collect_classical_blocks(&mut c, &sb, 0, &inode, 12289).unwrap();
@@ -2126,6 +2139,9 @@ mod tests {
         };
         let mut c = cursor_of(&img);
         let result = build_tree(&mut c, &sb, 0, "deep".to_string(), 2, MAX_DEPTH + 1);
-        assert!(result.unwrap().is_none(), "depth > MAX_DEPTH should return None");
+        assert!(
+            result.unwrap().is_none(),
+            "depth > MAX_DEPTH should return None"
+        );
     }
 }

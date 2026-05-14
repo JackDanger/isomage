@@ -2119,7 +2119,7 @@ mod tests {
         w16(&mut img, 259 * S + 256, 0); // FSD partition = 0
         w32(&mut img, 259 * S + 264, 64); // MapTableLength = 64
         w32(&mut img, 259 * S + 268, 1); // NumPartitionMaps = 1
-        // Type-2 partition map at LVD offset 440
+                                         // Type-2 partition map at LVD offset 440
         img[259 * S + 440] = 2; // map_type = 2
         img[259 * S + 441] = 64; // map_length = 64
         img[259 * S + 445..259 * S + 468].copy_from_slice(b"*UDF Metadata Partition");
@@ -2157,8 +2157,8 @@ mod tests {
     fn parse_udf_metadata_partition_path() {
         let img = make_udf_metadata_partition_image();
         let mut c = Cursor::new(img);
-        let root = parse_udf(&mut c)
-            .expect("parse_udf failed on metadata-partition synthetic image");
+        let root =
+            parse_udf(&mut c).expect("parse_udf failed on metadata-partition synthetic image");
         assert_eq!(root.name, "/");
         assert!(root.is_directory);
         assert!(root.children.is_empty());

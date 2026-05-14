@@ -352,10 +352,7 @@ mod tests {
     #[test]
     fn parse_header_sector_too_short_returns_error() {
         let short = vec![0u8; 100];
-        assert!(matches!(
-            parse_header_sector(&short),
-            Err(Error::TooShort)
-        ));
+        assert!(matches!(parse_header_sector(&short), Err(Error::TooShort)));
     }
 
     #[test]
@@ -366,7 +363,11 @@ mod tests {
         f.write_all(&[0u8; 512]).unwrap();
         drop(f);
         // num_entries=10000, entry_size=200 → total=2_000_000 > MAX_ARRAY(1_048_576)
-        let header = Header { entries_lba: 0, num_entries: 10000, entry_size: 200 };
+        let header = Header {
+            entries_lba: 0,
+            num_entries: 10000,
+            entry_size: 200,
+        };
         let mut f = std::fs::File::open(&path).unwrap();
         let result = read_entries(&mut f, &header);
         std::fs::remove_file(&path).ok();
@@ -387,9 +388,13 @@ mod tests {
         let path = std::env::temp_dir().join("isomage_gpt_skip_empty_test.bin");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(&[0u8; 512]).unwrap(); // LBA 0 padding
-        f.write_all(&entries).unwrap();    // entries at LBA 1
+        f.write_all(&entries).unwrap(); // entries at LBA 1
         drop(f);
-        let header = Header { entries_lba: 1, num_entries, entry_size };
+        let header = Header {
+            entries_lba: 1,
+            num_entries,
+            entry_size,
+        };
         let mut f = std::fs::File::open(&path).unwrap();
         let parts = read_entries(&mut f, &header).unwrap();
         std::fs::remove_file(&path).ok();

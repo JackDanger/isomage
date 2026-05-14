@@ -788,7 +788,10 @@ mod tests {
         data[su_off + 4] = 0x02; // CURRENT flag
         data[su_off + 5..su_off + 13].copy_from_slice(b"ignored!");
         let result = extract_rock_ridge_name(&data, 60, 1);
-        assert_eq!(result, None, "CURRENT-flagged NM entry should produce no name");
+        assert_eq!(
+            result, None,
+            "CURRENT-flagged NM entry should produce no name"
+        );
     }
 
     #[test]
@@ -843,7 +846,7 @@ mod tests {
         img[root_off + 25] = 0x02; // directory
         img[root_off + 32] = 1;
         img[root_off + 33] = 0; // "."
-        // Sector 17 is left as all zeros — no CD001 → triggers break at line 72.
+                                // Sector 17 is left as all zeros — no CD001 → triggers break at line 72.
         let mut c = Cursor::new(img);
         let root = parse_iso9660(&mut c).expect("should succeed despite non-CD001 at sector 17");
         assert_eq!(root.name, "/");
@@ -940,7 +943,14 @@ mod tests {
         };
         let mut parent = crate::tree::TreeNode::new_directory("/".to_string());
         let mut c = Cursor::new(img);
-        let result = parse_directory(&mut c, &rec, &mut parent, VolumeDescriptorType::Primary, false, false);
+        let result = parse_directory(
+            &mut c,
+            &rec,
+            &mut parent,
+            VolumeDescriptorType::Primary,
+            false,
+            false,
+        );
         assert!(result.is_ok());
         assert!(parent.children.is_empty());
     }
@@ -1122,7 +1132,7 @@ mod tests {
         img[d + 25] = 0x02;
         img[d + 32] = filename_length;
         img[d + 33] = 0; // "."
-        // SP signature at su_start=34
+                         // SP signature at su_start=34
         img[d + 34] = b'S';
         img[d + 35] = b'P';
         // detect_rock_ridge: buffer.len()=4096 (capped), record_length=42,

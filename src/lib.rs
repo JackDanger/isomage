@@ -1370,7 +1370,11 @@ mod tests {
         let img = make_minimal_iso();
         let mut cur = std::io::Cursor::new(img);
         let result = detect_and_parse_filesystem_verbose(&mut cur, "synthetic.iso", true);
-        assert!(result.is_ok(), "verbose detection should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "verbose detection should succeed: {:?}",
+            result
+        );
         let root = result.unwrap();
         assert_eq!(root.name, "/");
         assert!(root.is_directory);
@@ -1395,9 +1399,14 @@ mod tests {
     struct AlwaysFailWriter;
     impl Write for AlwaysFailWriter {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"))
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
         }
-        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1407,7 +1416,10 @@ mod tests {
         let node = TreeNode::new_file_with_location("term.bin".to_string(), 6, 17 * 2048, 6);
         let mut w = AlwaysFailWriter;
         let result = cat_node(&mut cur, &node, &mut w);
-        assert!(result.is_err(), "cat_node should propagate PermissionDenied");
+        assert!(
+            result.is_err(),
+            "cat_node should propagate PermissionDenied"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("permission denied") || msg.contains("Permission denied"),
@@ -1448,7 +1460,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
         let result = extract_node(&mut cur, &dir, out.to_str().unwrap());
-        assert!(result.is_err(), "extracting child with no location must error");
+        assert!(
+            result.is_err(),
+            "extracting child with no location must error"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("not available"),

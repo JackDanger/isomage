@@ -633,10 +633,7 @@ mod tests {
         // 34 bytes: seek to offset 32 succeeds, but read_exact(4) gets only 2 bytes → TooShort.
         let data = vec![0u8; 34];
         let mut c = Cursor::new(data);
-        assert!(matches!(
-            read_nx_superblock(&mut c),
-            Err(Error::TooShort)
-        ));
+        assert!(matches!(read_nx_superblock(&mut c), Err(Error::TooShort)));
     }
 
     #[test]
@@ -646,9 +643,6 @@ mod tests {
         let mut data = vec![0u8; 38];
         data[32..36].copy_from_slice(&NXSB_MAGIC.to_le_bytes());
         let mut c = Cursor::new(data);
-        assert!(matches!(
-            read_nx_superblock(&mut c),
-            Err(Error::TooShort)
-        ));
+        assert!(matches!(read_nx_superblock(&mut c), Err(Error::TooShort)));
     }
 }

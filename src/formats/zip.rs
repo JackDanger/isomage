@@ -1121,7 +1121,7 @@ mod tests {
         let eocd_off = 20usize;
         buf[eocd_off..eocd_off + 4].copy_from_slice(&EOCD_SIG.to_le_bytes());
         buf[eocd_off + 10..eocd_off + 12].copy_from_slice(&0xFFFFu16.to_le_bytes()); // zip64 sentinel
-        // bytes 0..20 = locator area (all zeros → wrong sig)
+                                                                                     // bytes 0..20 = locator area (all zeros → wrong sig)
         let mut c = Cursor::new(buf);
         assert!(matches!(detect(&mut c), Err(Error::NotZip)));
     }
@@ -1139,11 +1139,11 @@ mod tests {
         let eocd_off = eocd64_size + locator_size;
         buf[eocd_off..eocd_off + 4].copy_from_slice(&EOCD_SIG.to_le_bytes());
         buf[eocd_off + 10..eocd_off + 12].copy_from_slice(&0xFFFFu16.to_le_bytes()); // zip64
-        // Locator: EOCD64_LOCATOR_SIG + disk=0 + eocd64_offset=0 + total_disks=1.
+                                                                                     // Locator: EOCD64_LOCATOR_SIG + disk=0 + eocd64_offset=0 + total_disks=1.
         let loc_off = eocd64_size;
         buf[loc_off..loc_off + 4].copy_from_slice(&EOCD64_LOCATOR_SIG.to_le_bytes());
         buf[loc_off + 8..loc_off + 16].copy_from_slice(&0u64.to_le_bytes()); // eocd64 at offset 0
-        // Block at offset 0 has wrong sig (all zeros ≠ EOCD64_SIG).
+                                                                             // Block at offset 0 has wrong sig (all zeros ≠ EOCD64_SIG).
         let mut c = Cursor::new(buf);
         assert!(matches!(detect(&mut c), Err(Error::NotZip)));
     }
@@ -1274,7 +1274,11 @@ mod tests {
 
         let mut c = Cursor::new(&z);
         let root = detect_and_parse(&mut c).expect("garbage-padded CD should parse");
-        assert_eq!(root.children.len(), 1, "should find exactly 1 entry before break");
+        assert_eq!(
+            root.children.len(),
+            1,
+            "should find exactly 1 entry before break"
+        );
     }
 
     // ── parse_zip64_extra: size overflow break ────────────────────────────────
@@ -1286,7 +1290,7 @@ mod tests {
         extra.extend_from_slice(&0x0001u16.to_le_bytes()); // tag
         extra.extend_from_slice(&100u16.to_le_bytes()); // size claims 100 bytes
         extra.extend_from_slice(&1u64.to_le_bytes()); // only 8 bytes of data
-        // pos + size = 4 + 100 = 104 > extra.len() = 12 → break
+                                                      // pos + size = 4 + 100 = 104 > extra.len() = 12 → break
         let (c, u, o) = parse_zip64_extra(&extra, 0xFFFF_FFFFu64, 0xFFFF_FFFFu64, 0xFFFF_FFFFu64);
         // All remain as their sentinel values (not replaced due to break).
         assert_eq!((c, u, o), (0xFFFF_FFFFu64, 0xFFFF_FFFFu64, 0xFFFF_FFFFu64));

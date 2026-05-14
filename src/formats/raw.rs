@@ -234,7 +234,7 @@ mod tests {
         let h = 512;
         img[h..h + 8].copy_from_slice(b"EFI PART");
         img[h + 80..h + 84].copy_from_slice(&128u32.to_le_bytes()); // num_entries
-        img[h + 84..h + 88].copy_from_slice(&64u32.to_le_bytes());  // entry_size < 128
+        img[h + 84..h + 88].copy_from_slice(&64u32.to_le_bytes()); // entry_size < 128
         let path = scratch(&img, "gpt-badentry");
         let mut f = File::open(&path).unwrap();
         let result = detect_and_parse(&mut f);
