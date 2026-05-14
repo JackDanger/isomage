@@ -1183,7 +1183,7 @@ mod tests {
 
     #[test]
     fn error_display_io() {
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "disk fail");
+        let io = std::io::Error::other("disk fail");
         let msg = format!("{}", Error::Io(io));
         assert!(msg.contains("disk fail"), "unexpected: {msg}");
     }
@@ -1191,7 +1191,7 @@ mod tests {
     #[test]
     fn error_source_io() {
         use std::error::Error as StdError;
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        let io = std::io::Error::other("src");
         assert!(Error::Io(io).source().is_some());
     }
 
@@ -1279,16 +1279,9 @@ mod tests {
     fn make_ext4_extent_image() -> Vec<u8> {
         // Like make_ext2_image but the file inode uses an extent tree.
         const BS: usize = 1024;
-        const TOTAL_BLOCKS: usize = 256;
-        const IMAGE_SIZE: usize = TOTAL_BLOCKS * BS;
         const INODE_SIZE: usize = 128;
-        const INODES_PER_GROUP: usize = 256;
-        const BLOCK_BITMAP_BLK: usize = 3;
-        const INODE_BITMAP_BLK: usize = 4;
         const INODE_TABLE_BLK: usize = 5;
-        const ROOT_DATA_BLK: usize = 6;
         const FILE_DATA_BLK: usize = 7;
-        const ROOT_INUM: usize = 2;
         const FILE_INUM: usize = 3;
 
         let mut img = make_ext2_image(); // start from the classical image

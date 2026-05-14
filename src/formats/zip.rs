@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn error_display_io() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk fail");
+        let io_err = std::io::Error::other("disk fail");
         let msg = format!("{}", Error::Io(io_err));
         assert!(msg.contains("disk fail"), "expected cause in: {msg}");
     }
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn error_source_io() {
         use std::error::Error as StdError;
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        let io_err = std::io::Error::other("src");
         let e = Error::Io(io_err);
         assert!(e.source().is_some());
     }

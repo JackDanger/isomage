@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn error_display_io() {
-        let io = io::Error::new(io::ErrorKind::Other, "disk");
+        let io = io::Error::other("disk");
         let msg = format!("{}", Error::Io(io));
         assert!(msg.contains("disk"), "unexpected: {msg}");
     }
@@ -952,7 +952,7 @@ mod tests {
     #[test]
     fn error_source_io() {
         use std::error::Error as StdError;
-        let io = io::Error::new(io::ErrorKind::Other, "src");
+        let io = io::Error::other("src");
         assert!(Error::Io(io).source().is_some());
     }
 
@@ -965,13 +965,6 @@ mod tests {
     }
 
     // ── parse_inode_body variants ─────────────────────────────────────────────
-
-    fn make_inode_common() -> Vec<u8> {
-        // 16-byte common header: type(u16) mode(u16) uid(u16) gid(u16) mtime(u32) ino(u32)
-        // (The common header is parsed by the caller before calling parse_inode_body;
-        // we pass the *body* which starts right after.)
-        Vec::new()
-    }
 
     #[test]
     fn parse_inode_body_ldir() {
