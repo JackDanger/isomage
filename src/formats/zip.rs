@@ -46,6 +46,7 @@ const EOCD64_LOCATOR_SIZE: u64 = 20;
 /// Max comment length (u16::MAX) + EOCD fixed fields.
 const MAX_EOCD_SEARCH: u64 = 65535 + EOCD_MIN_SIZE;
 
+const FLAG_ENCRYPTED: u16 = 0x0001;
 const METHOD_STORED: u16 = 0;
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -161,6 +162,7 @@ struct CdEntry {
     /// Slash-delimited name as stored in the CD (may end with `/` for dirs).
     name: String,
     method: u16,
+    is_encrypted: bool,
     uncompressed_size: u64,
     /// Byte offset of the local file header for this entry.
     local_header_offset: u64,
@@ -179,6 +181,7 @@ fn parse_central_directory(buf: &[u8]) -> Result<Vec<CdEntry>, Error> {
             return Err(Error::BadCentralDirectory);
         }
 
+        let general_flags = u16::from_le_bytes([buf[pos + 8], buf[pos + 9]]);
         let method = u16::from_le_bytes([buf[pos + 10], buf[pos + 11]]);
         let compressed_size =
             u32::from_le_bytes([buf[pos + 20], buf[pos + 21], buf[pos + 22], buf[pos + 23]]) as u64;
@@ -215,6 +218,7 @@ fn parse_central_directory(buf: &[u8]) -> Result<Vec<CdEntry>, Error> {
         entries.push(CdEntry {
             name,
             method,
+            is_encrypted: general_flags & FLAG_ENCRYPTED != 0,
             uncompressed_size: uncomp,
             local_header_offset: lh_off,
         });
@@ -311,7 +315,7 @@ fn build_tree<R: Read + Seek>(r: &mut R, entries: Vec<CdEntry>) -> TreeNode {
                 node.is_directory = false;
                 node.size = entry.uncompressed_size;
                 node.file_length = Some(entry.uncompressed_size);
-                if entry.method == METHOD_STORED {
+                if entry.method == METHOD_STORED && !entry.is_encrypted {
                     node.file_location = local_data_offset(r, entry.local_header_offset);
                 }
             }
@@ -530,12 +534,16 @@ mod tests {
     use std::io::Cursor;
 
     fn make_stored_zip(name: &[u8], data: &[u8]) -> Vec<u8> {
+        make_stored_zip_with_flags(name, data, 0)
+    }
+
+    fn make_stored_zip_with_flags(name: &[u8], data: &[u8], general_flags: u16) -> Vec<u8> {
         let mut z = Vec::new();
 
         let lh_offset = z.len() as u32;
         z.extend_from_slice(&LFH_SIG.to_le_bytes());
         z.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        z.extend_from_slice(&0u16.to_le_bytes()); // flags
+        z.extend_from_slice(&general_flags.to_le_bytes());
         z.extend_from_slice(&METHOD_STORED.to_le_bytes());
         z.extend_from_slice(&0u32.to_le_bytes()); // mod time + date
         z.extend_from_slice(&0u32.to_le_bytes()); // CRC-32
@@ -550,7 +558,7 @@ mod tests {
         z.extend_from_slice(&CDR_SIG.to_le_bytes());
         z.extend_from_slice(&20u16.to_le_bytes()); // version made by
         z.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        z.extend_from_slice(&0u16.to_le_bytes()); // flags
+        z.extend_from_slice(&general_flags.to_le_bytes());
         z.extend_from_slice(&METHOD_STORED.to_le_bytes());
         z.extend_from_slice(&0u32.to_le_bytes()); // mod time + date
         z.extend_from_slice(&0u32.to_le_bytes()); // CRC-32
@@ -597,6 +605,20 @@ mod tests {
         assert!(
             file.file_location.is_some(),
             "stored file must have file_location"
+        );
+    }
+
+    #[test]
+    fn encrypted_stored_entry_has_no_file_location() {
+        let zip = make_stored_zip_with_flags(b"secret.txt", b"ciphertext", FLAG_ENCRYPTED);
+        let mut c = Cursor::new(&zip);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        let file = root.find_node("secret.txt").expect("secret.txt exists");
+        assert_eq!(file.size, 10);
+        assert_eq!(file.file_length, Some(10));
+        assert!(
+            file.file_location.is_none(),
+            "encrypted stored entry should not expose raw ciphertext as file data"
         );
     }
 
