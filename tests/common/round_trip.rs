@@ -68,6 +68,10 @@ pub struct RoundTrip {
     env: Vec<(OsString, OsString)>,
     source_files: Vec<(PathBuf, Vec<u8>)>,
     image_preallocate: Option<u64>,
+    /// If `true`, run the tool with its working directory set to `$SRC_DIR`
+    /// instead of the process CWD. Useful for archive tools like `zip` that
+    /// use the CWD to determine stored entry paths.
+    run_from_src_dir: bool,
 }
 
 impl RoundTrip {
@@ -83,7 +87,19 @@ impl RoundTrip {
             env: Vec::new(),
             source_files: Vec::new(),
             image_preallocate: None,
+            run_from_src_dir: false,
         }
+    }
+
+    /// Run the tool with its working directory set to `$SRC_DIR`.
+    ///
+    /// Required for archive tools like `zip` and `tar` that use the CWD to
+    /// control the stored entry paths: `zip -r $IMAGE .` from `$SRC_DIR`
+    /// stores relative paths; the same command from the process CWD would
+    /// store absolute paths.
+    pub fn working_dir_is_src(mut self) -> Self {
+        self.run_from_src_dir = true;
+        self
     }
 
     /// The tool that produces the image.
@@ -226,11 +242,17 @@ impl RoundTrip {
         let bind_mounts: &[&std::path::Path] = &[tmp.path()];
         let env_slice: Vec<(OsString, OsString)> = self.env.clone();
         let stdin_slice: Option<&[u8]> = self.stdin.as_deref();
+        let cwd: Option<&Path> = if self.run_from_src_dir {
+            Some(&src_dir)
+        } else {
+            None
+        };
         let output = tool.run_in_venue(
             substituted.iter().map(|s| s.as_os_str()),
             &env_slice,
             stdin_slice,
             bind_mounts,
+            cwd,
         );
 
         let output = output.map_err(Skip::from)?;

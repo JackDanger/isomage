@@ -243,12 +243,15 @@ impl Tool {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.run_in_venue(args, env, stdin, &[])
+        self.run_in_venue(args, env, stdin, &[], None)
     }
 
     /// Run the tool, optionally bind-mounting host paths into the
     /// venue's container (only meaningful when [`ToolVenue::Docker`]
     /// is in effect; ignored for [`ToolVenue::Path`]).
+    ///
+    /// `cwd` overrides the working directory of the spawned process.
+    /// `None` inherits the current process's CWD (the default).
     ///
     /// [`super::round_trip::RoundTrip::try_build`] uses this to
     /// thread the round-trip tempdir into the container, so
@@ -259,6 +262,7 @@ impl Tool {
         env: &[(OsString, OsString)],
         stdin: Option<&[u8]>,
         bind_mounts: &[&std::path::Path],
+        cwd: Option<&Path>,
     ) -> Result<ToolOutput, ToolError>
     where
         I: IntoIterator<Item = S>,
@@ -289,6 +293,9 @@ impl Tool {
             });
         for (k, v) in env {
             cmd.env(k, v);
+        }
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
         }
 
         let mut child = cmd.spawn().map_err(|e| ToolError::Spawn {

@@ -118,6 +118,15 @@ pub mod tools {
     /// of the formats we do).
     pub const SEVEN_ZZ: Tool = Tool::with_aliases("7zz", &["7z"]);
 
+    // --- Archive tools --------------------------------------------------
+
+    /// System `zip` for building ZIP test archives.
+    pub const ZIP: Tool = Tool::new("zip");
+    /// System `unzip` for listing and extracting ZIP archives.
+    pub const UNZIP: Tool = Tool::new("unzip");
+    /// System `tar` for building TAR test archives.
+    pub const TAR: Tool = Tool::new("tar");
+
     // --- Universal smoke-test tools ------------------------------
     //
     // These are present on every POSIX system without installation

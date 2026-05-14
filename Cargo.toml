@@ -68,6 +68,8 @@ ext = []
 hfsplus = []
 squashfs = []
 apfs = []
+zip = []
+tar = []
 
 # Performance opt-ins. Both gate `unsafe`; default build is safe-only.
 mmap = ["dep:memmap2"]     # memmap2 + MmapImage. Adds runtime dep when enabled.
@@ -165,6 +167,14 @@ required-features = ["dmg"]
 [[test]]
 name = "apfs_round_trip"
 required-features = ["apfs"]
+
+[[test]]
+name = "zip_round_trip"
+required-features = ["zip"]
+
+[[test]]
+name = "tar_round_trip"
+required-features = ["tar"]
 
 [profile.release]
 opt-level = 2
