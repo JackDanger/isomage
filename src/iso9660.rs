@@ -716,4 +716,516 @@ mod tests {
         assert_eq!(root.name, "/");
         assert!(!root.children.is_empty());
     }
+
+    // ── parse_directory_record: additional edge cases ─────────────────────────
+
+    #[test]
+    fn directory_record_filename_extends_past_buffer() {
+        // filename_length=100 but buffer only 50 bytes → 33+100 > 50 → Err (line 204).
+        let mut buf = [0u8; 50];
+        buf[0] = 50;
+        buf[32] = 100; // filename_length = 100, overflows
+        assert!(parse_directory_record(&buf, VolumeDescriptorType::Primary).is_err());
+    }
+
+    #[test]
+    fn directory_record_primary_no_semicolon() {
+        // Filename without ';' → else branch (line 236: `&raw_name`), no stripping.
+        let name = b"HELLO";
+        let mut buf = vec![0u8; 33 + name.len() + 2];
+        buf[0] = (33 + name.len()) as u8;
+        buf[32] = name.len() as u8;
+        buf[33..33 + name.len()].copy_from_slice(name);
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Primary).unwrap();
+        assert_eq!(rec.filename, "HELLO");
+    }
+
+    #[test]
+    fn directory_record_joliet_with_version_suffix() {
+        // Joliet filename with ';1' → strip suffix (line 226).
+        let name: Vec<u8> = "hi.txt;1"
+            .encode_utf16()
+            .flat_map(|c| c.to_be_bytes())
+            .collect();
+        let mut buf = vec![0u8; 33 + name.len() + 2];
+        buf[0] = (33 + name.len()) as u8;
+        buf[32] = name.len() as u8;
+        buf[33..33 + name.len()].copy_from_slice(&name);
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Joliet).unwrap();
+        assert_eq!(rec.filename, "hi.txt");
+    }
+
+    #[test]
+    fn directory_record_empty_filename_length_zero() {
+        // filename_length=0 → treated as "." (line 209 `filename_length == 0`).
+        let mut buf = [0u8; 40];
+        buf[0] = 34;
+        buf[32] = 0; // filename_length = 0
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Primary).unwrap();
+        assert_eq!(rec.filename, ".");
+    }
+
+    // ── extract_rock_ridge_name: additional paths ────────────────────────────
+
+    #[test]
+    fn rock_ridge_name_su_start_too_large() {
+        // su_start >= record_length → return None (line 257).
+        let data = vec![0u8; 40];
+        // filename_length=10 → su_start = 33+10+((10+1)%2) = 33+10+1 = 44 > record_length=40
+        let result = extract_rock_ridge_name(&data, 40, 10);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn rock_ridge_nm_current_flag_skipped() {
+        // flags=0x02 → CURRENT flag → name bytes skipped (line 276 body entered).
+        let mut data = vec![0u8; 60];
+        let su_off = 34;
+        data[su_off] = b'N';
+        data[su_off + 1] = b'M';
+        data[su_off + 2] = 13;
+        data[su_off + 3] = 1;
+        data[su_off + 4] = 0x02; // CURRENT flag
+        data[su_off + 5..su_off + 13].copy_from_slice(b"ignored!");
+        let result = extract_rock_ridge_name(&data, 60, 1);
+        assert_eq!(result, None, "CURRENT-flagged NM entry should produce no name");
+    }
+
+    #[test]
+    fn rock_ridge_entry_too_short_breaks() {
+        // entry_len=2 < 4 → break on first iteration (entry_len < 4 guard).
+        let mut data = vec![0u8; 60];
+        let su_off = 34;
+        data[su_off] = b'N';
+        data[su_off + 1] = b'M';
+        data[su_off + 2] = 2; // entry_len=2 < 4 → break
+        let result = extract_rock_ridge_name(&data, 60, 1);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn rock_ridge_while_loop_terminates_normally() {
+        // While loop exits via condition (not break), covering line 282.
+        // su_start=34, entry_len=8 → one NM entry, offset advances to 8.
+        // Then offset+4=12 > su_area.len()=8 → while condition false → line 282 covered.
+        let mut data = vec![0u8; 50];
+        // record_length=42, filename_length=1 → su_start=34, su_area.len()=42-34=8
+        let su_off = 34;
+        data[su_off] = b'N';
+        data[su_off + 1] = b'M';
+        data[su_off + 2] = 8; // entry_len=8
+        data[su_off + 3] = 1; // version
+        data[su_off + 4] = 0; // flags=0 (normal)
+        data[su_off + 5] = b'h';
+        data[su_off + 6] = b'i';
+        data[su_off + 7] = b'!';
+        // After processing this entry: offset=8, 8+4=12 > 8=su_area.len() → while exits normally.
+        let result = extract_rock_ridge_name(&data, 42, 1);
+        assert_eq!(result, Some("hi!".to_string()));
+    }
+
+    // ── parse_iso9660: additional parse paths ────────────────────────────────
+
+    #[test]
+    fn parse_iso9660_breaks_on_non_cd001_sector() {
+        // Sector 16 = PVD with CD001. Sector 17 = all zeros (no CD001).
+        // Loop reads sector 17, no CD001 + sector != 16 → break (lines 71-72).
+        // Parser still succeeds with the PVD found at sector 16.
+        let mut img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        // Root dir: sector 18, size 2048 (empty).
+        let root_off = pvd + 156;
+        img[root_off] = 34;
+        img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[root_off + 10..root_off + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[root_off + 25] = 0x02; // directory
+        img[root_off + 32] = 1;
+        img[root_off + 33] = 0; // "."
+        // Sector 17 is left as all zeros — no CD001 → triggers break at line 72.
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).expect("should succeed despite non-CD001 at sector 17");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn parse_iso9660_unknown_vd_type_ignored() {
+        // VD type=3 (unknown) at sector 17 → `_ => {}` (line 100).
+        let mut img = make_iso_primary_only();
+        // Overwrite sector 17 with a type=3 VD before the VDST.
+        // (The VDST is still at 17 in make_iso_primary_only — we shift it to 18.)
+        img.resize(S * 22, 0);
+        // Type=3 at sector 17.
+        img[17 * S] = 3; // unknown type
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        // VDST at sector 18.
+        img[18 * S] = 255;
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"CD001");
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).expect("unknown VD type should be ignored");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn parse_iso9660_verbose_joliet_path() {
+        // Covers verbose Joliet messages (lines 89, 118).
+        let img = make_iso_joliet();
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660_verbose(&mut c, true).expect("verbose Joliet parse");
+        assert!(root.find_node("/hi.txt").is_some());
+    }
+
+    #[test]
+    fn parse_iso9660_non_joliet_svd_ignored() {
+        // SVD without Joliet escape → closing `}` of `if escape ==` (line 92 FALSE branch).
+        // Build from scratch: PVD(16) + non-Joliet SVD(17) + VDST(18) + rootdir(19) + data(20)
+        let mut img = vec![0u8; S * 22];
+        // PVD at sector 16, root dir at sector 19
+        let pvd = 16 * S;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        let root_off = pvd + 156;
+        img[root_off] = 34;
+        img[root_off + 2..root_off + 6].copy_from_slice(&19u32.to_le_bytes()); // root at 19
+        img[root_off + 10..root_off + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[root_off + 25] = 0x02;
+        img[root_off + 32] = 1;
+        img[root_off + 33] = 0;
+        // Non-Joliet SVD at sector 17 (no escape sequences → not Joliet)
+        img[17 * S] = 2;
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        // VDST at sector 18
+        img[18 * S] = 255;
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"CD001");
+        // Root dir at sector 19
+        let d = 19 * S;
+        img[d] = 34;
+        img[d + 2..d + 6].copy_from_slice(&19u32.to_le_bytes());
+        img[d + 10..d + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[d + 25] = 0x02;
+        img[d + 32] = 1;
+        img[d + 33] = 0;
+        let e1 = d + 34;
+        img[e1] = 34;
+        img[e1 + 2..e1 + 6].copy_from_slice(&19u32.to_le_bytes());
+        img[e1 + 10..e1 + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[e1 + 25] = 0x02;
+        img[e1 + 32] = 1;
+        img[e1 + 33] = 1;
+        let e2 = e1 + 34;
+        let name = b"HELLO.TXT;1";
+        img[e2] = (33 + name.len()) as u8;
+        img[e2 + 2..e2 + 6].copy_from_slice(&20u32.to_le_bytes()); // data at sector 20
+        img[e2 + 10..e2 + 14].copy_from_slice(&11u32.to_le_bytes());
+        img[e2 + 32] = name.len() as u8;
+        img[e2 + 33..e2 + 33 + name.len()].copy_from_slice(name);
+        img[20 * S..20 * S + 11].copy_from_slice(b"Hello World");
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).expect("non-Joliet SVD should be ignored");
+        assert!(root.find_node("/HELLO.TXT").is_some());
+    }
+
+    // ── parse_directory: additional paths ────────────────────────────────────
+
+    #[test]
+    fn parse_directory_non_directory_returns_ok() {
+        // Calling parse_directory on a non-directory record → immediate Ok (line 303).
+        let img = make_iso_primary_only();
+        let rec = DirectoryRecord {
+            extent_location: 0,
+            data_length: 100,
+            is_directory: false,
+            filename: "file.txt".to_string(),
+        };
+        let mut parent = crate::tree::TreeNode::new_directory("/".to_string());
+        let mut c = Cursor::new(img);
+        let result = parse_directory(&mut c, &rec, &mut parent, VolumeDescriptorType::Primary, false, false);
+        assert!(result.is_ok());
+        assert!(parent.children.is_empty());
+    }
+
+    #[test]
+    fn parse_directory_zero_byte_padding_advances_to_sector() {
+        // Zero byte mid-buffer → skip to next sector boundary (lines 315-322).
+        let mut dir_img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        dir_img[pvd] = 1;
+        dir_img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        let root_off = pvd + 156;
+        dir_img[root_off] = 34;
+        dir_img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[root_off + 10..root_off + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        dir_img[root_off + 25] = 0x02;
+        dir_img[root_off + 32] = 1;
+        dir_img[root_off + 33] = 0;
+        // VDST
+        dir_img[17 * S] = 255;
+        dir_img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        // Root dir at sector 18: "." + ".." + zero byte at offset 68 + file entry at 2048.
+        let d = 18 * S;
+        // "." entry
+        dir_img[d] = 34;
+        dir_img[d + 2..d + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[d + 10..d + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        dir_img[d + 25] = 0x02;
+        dir_img[d + 32] = 1;
+        dir_img[d + 33] = 0;
+        // ".." entry
+        dir_img[d + 34] = 34;
+        dir_img[d + 34 + 2..d + 34 + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[d + 34 + 10..d + 34 + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        dir_img[d + 34 + 25] = 0x02;
+        dir_img[d + 34 + 32] = 1;
+        dir_img[d + 34 + 33] = 1;
+        // Offset 68: leave as 0x00 → zero byte → skip to next sector boundary.
+        // (Next sector boundary from offset 68 in a 2048-byte buffer: (68/2048+1)*2048 = 2048)
+        // After the skip, offset=2048 which equals buffer.len() → loop exits.
+        // The parser should return an empty root (no files added since only "." and ".." were seen before).
+        let mut c = Cursor::new(dir_img);
+        let root = parse_iso9660(&mut c).expect("zero-padded dir should parse");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn parse_directory_record_parse_error_skipped() {
+        // When parse_directory_record returns Err within the parse_directory loop,
+        // that record is skipped (line 378: `if let Ok(mut record)` FALSE branch).
+        // Craft a directory where one entry has record_length > remaining buffer → parse fails.
+        // Actually the outer check `record_length == 0 || offset + record_length > buffer.len()`
+        // breaks the loop before calling parse_directory_record in that case.
+        // Instead: craft a record where filename_length overflows → parse_directory_record Err.
+        let mut dir_img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        dir_img[pvd] = 1;
+        dir_img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        let root_off = pvd + 156;
+        dir_img[root_off] = 34;
+        dir_img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        // data_length=100: buffer is 100 bytes, entry at offset 68 gets 32-byte slice < 34
+        dir_img[root_off + 10..root_off + 14].copy_from_slice(&100u32.to_le_bytes());
+        dir_img[root_off + 25] = 0x02;
+        dir_img[root_off + 32] = 1;
+        dir_img[root_off + 33] = 0;
+        dir_img[17 * S] = 255;
+        dir_img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        let d = 18 * S;
+        // "." entry
+        dir_img[d] = 34;
+        dir_img[d + 2..d + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[d + 10..d + 14].copy_from_slice(&100u32.to_le_bytes());
+        dir_img[d + 25] = 0x02;
+        dir_img[d + 32] = 1;
+        dir_img[d + 33] = 0;
+        // ".." entry
+        dir_img[d + 34] = 34;
+        dir_img[d + 34 + 2..d + 34 + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[d + 34 + 10..d + 34 + 14].copy_from_slice(&100u32.to_le_bytes());
+        dir_img[d + 34 + 25] = 0x02;
+        dir_img[d + 34 + 32] = 1;
+        dir_img[d + 34 + 33] = 1;
+        // Bad entry at offset 68: record_length=32 → buffer is data_length=100 bytes, so
+        // parse_directory_record receives buffer[68..100] = 32 bytes < 34 → Err → if let Ok FALSE.
+        dir_img[d + 68] = 32;
+        let mut c = Cursor::new(dir_img);
+        let root = parse_iso9660(&mut c).expect("bad dir entry should be skipped");
+        assert_eq!(root.name, "/");
+        assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn parse_directory_record_length_overflow_breaks() {
+        // record_length=33 at offset 68 in a 100-byte buffer → 68+33=101 > 100 → break (line 328).
+        let mut dir_img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        dir_img[pvd] = 1;
+        dir_img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        let root_off = pvd + 156;
+        dir_img[root_off] = 34;
+        dir_img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[root_off + 10..root_off + 14].copy_from_slice(&100u32.to_le_bytes());
+        dir_img[root_off + 25] = 0x02;
+        dir_img[root_off + 32] = 1;
+        dir_img[root_off + 33] = 0;
+        dir_img[17 * S] = 255;
+        dir_img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        let d = 18 * S;
+        dir_img[d] = 34;
+        dir_img[d + 2..d + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[d + 10..d + 14].copy_from_slice(&100u32.to_le_bytes());
+        dir_img[d + 25] = 0x02;
+        dir_img[d + 32] = 1;
+        dir_img[d + 33] = 0;
+        dir_img[d + 34] = 34;
+        dir_img[d + 34 + 2..d + 34 + 6].copy_from_slice(&18u32.to_le_bytes());
+        dir_img[d + 34 + 10..d + 34 + 14].copy_from_slice(&100u32.to_le_bytes());
+        dir_img[d + 34 + 25] = 0x02;
+        dir_img[d + 34 + 32] = 1;
+        dir_img[d + 34 + 33] = 1;
+        // offset=68, record_length=33 → 68+33=101 > 100 → break
+        dir_img[d + 68] = 33;
+        let mut c = Cursor::new(dir_img);
+        let root = parse_iso9660(&mut c).expect("overflow record should break loop cleanly");
+        assert!(root.children.is_empty());
+    }
+
+    // ── detect_rock_ridge: additional paths ──────────────────────────────────
+
+    #[test]
+    fn detect_rock_ridge_short_buffer_returns_false() {
+        // Root dir data_length < 34 → detect_rock_ridge returns Ok(false) (line 167).
+        let mut img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        let root_off = pvd + 156;
+        img[root_off] = 34;
+        img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[root_off + 10..root_off + 14].copy_from_slice(&20u32.to_le_bytes()); // size=20 < 34
+        img[root_off + 25] = 0x02;
+        img[root_off + 32] = 1;
+        img[root_off + 33] = 0;
+        img[17 * S] = 255;
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        let mut c = Cursor::new(img);
+        // parse_iso9660 on a Primary VD calls detect_rock_ridge;
+        // root dir has size=20 < 34 → Ok(false) returned.
+        let root = parse_iso9660(&mut c).expect("short root buffer should not error");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn detect_rock_ridge_sp_signature_detected() {
+        // Root dir first entry has SP signature in system use → detect_rock_ridge returns Ok(true).
+        // Covers lines 175-178.
+        let mut img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        let root_off = pvd + 156;
+        img[root_off] = 34;
+        img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[root_off + 10..root_off + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[root_off + 25] = 0x02;
+        img[root_off + 32] = 1;
+        img[root_off + 33] = 0;
+        img[17 * S] = 255;
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        // Root dir at sector 18: first record with SP signature in system use.
+        let d = 18 * S;
+        let record_len: u8 = 42;
+        let filename_length: u8 = 1;
+        // su_start = 33 + 1 + ((1+1)%2) = 34
+        img[d] = record_len;
+        img[d + 2..d + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[d + 10..d + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[d + 25] = 0x02;
+        img[d + 32] = filename_length;
+        img[d + 33] = 0; // "."
+        // SP signature at su_start=34
+        img[d + 34] = b'S';
+        img[d + 35] = b'P';
+        // detect_rock_ridge: buffer.len()=4096 (capped), record_length=42,
+        // su_start=34, su_start+7=41 <= record_length=42 ✓ → sig="SP" → Ok(true)
+        // → verbose message (line 142) if verbose=true
+        let mut c = Cursor::new(img.clone());
+        let root = parse_iso9660(&mut c).expect("SP rock ridge should parse");
+        assert_eq!(root.name, "/");
+
+        // Also test verbose path (line 142).
+        let mut c2 = Cursor::new(img);
+        let root2 = parse_iso9660_verbose(&mut c2, true).expect("verbose rock ridge");
+        assert_eq!(root2.name, "/");
+    }
+
+    #[test]
+    fn detect_rock_ridge_nm_px_signatures() {
+        // NM or PX signature → lines 180-182 covered.
+        let mut img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        let root_off = pvd + 156;
+        img[root_off] = 34;
+        img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[root_off + 10..root_off + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[root_off + 25] = 0x02;
+        img[root_off + 32] = 1;
+        img[root_off + 33] = 0;
+        img[17 * S] = 255;
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        let d = 18 * S;
+        img[d] = 42;
+        img[d + 2..d + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[d + 10..d + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[d + 25] = 0x02;
+        img[d + 32] = 1;
+        img[d + 33] = 0;
+        // PX signature at su_start=34
+        img[d + 34] = b'P';
+        img[d + 35] = b'X';
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).expect("PX rock ridge should parse");
+        assert_eq!(root.name, "/");
+    }
+
+    #[test]
+    fn parse_iso9660_rock_ridge_name_in_directory() {
+        // Full Rock Ridge NM name replacement in parse_directory (lines 334-345, 282).
+        let mut img = vec![0u8; S * 20];
+        let pvd = 16 * S;
+        img[pvd] = 1;
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        // Root dir at sector 18.
+        let root_off = pvd + 156;
+        img[root_off] = 34;
+        img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[root_off + 10..root_off + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[root_off + 25] = 0x02;
+        img[root_off + 32] = 1;
+        img[root_off + 33] = 0;
+        // First record also has SP signature so Rock Ridge is detected.
+        let d = 18 * S;
+        img[d] = 42;
+        img[d + 2..d + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[d + 10..d + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[d + 25] = 0x02;
+        img[d + 32] = 1;
+        img[d + 33] = 0; // "."
+        img[d + 34] = b'S';
+        img[d + 35] = b'P';
+        // VDST at sector 17.
+        img[17 * S] = 255;
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"CD001");
+        // File entry at offset 42 in root dir: name="F;1" with NM entry "longname.txt"
+        let e = d + 42;
+        let iso_name = b"F;1";
+        let rr_name = b"longname.txt";
+        // su_start = 33 + 3 + ((3+1)%2) = 33 + 3 + 0 = 36
+        // NM at su_start: sig="NM", entry_len=5+12=17, flags=0
+        let entry_len = 33 + iso_name.len() + 17;
+        img[e] = entry_len as u8;
+        img[e + 2..e + 6].copy_from_slice(&19u32.to_le_bytes()); // extent=sector 19
+        img[e + 10..e + 14].copy_from_slice(&11u32.to_le_bytes()); // size=11
+        img[e + 25] = 0x00; // file
+        img[e + 32] = iso_name.len() as u8;
+        img[e + 33..e + 33 + iso_name.len()].copy_from_slice(iso_name);
+        // su_start = 33 + 3 + ((3+1)%2) = 36
+        let su = e + 36;
+        img[su] = b'N';
+        img[su + 1] = b'M';
+        img[su + 2] = (5 + rr_name.len()) as u8;
+        img[su + 3] = 1; // version
+        img[su + 4] = 0; // flags = normal name
+        img[su + 5..su + 5 + rr_name.len()].copy_from_slice(rr_name);
+        // File data at sector 19.
+        img[19 * S..19 * S + 11].copy_from_slice(b"Hello World");
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).expect("rock ridge with NM entry");
+        // The file should be named "longname.txt" (Rock Ridge NM), not "F".
+        assert!(
+            root.find_node("/longname.txt").is_some(),
+            "Rock Ridge NM name not applied"
+        );
+    }
 }
