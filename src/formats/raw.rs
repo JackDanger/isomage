@@ -148,6 +148,77 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_no_partition_table() {
+        let msg = format!("{}", Error::NoPartitionTable);
+        assert!(msg.contains("MBR") || msg.contains("GPT") || msg.contains("partition"));
+    }
+
+    #[test]
+    fn error_display_mbr_wraps_inner() {
+        let msg = format!("{}", Error::Mbr(mbr::Error::TooShort));
+        assert!(msg.contains("MBR"), "expected MBR prefix in: {msg}");
+    }
+
+    #[test]
+    fn error_display_gpt_wraps_inner() {
+        let msg = format!("{}", Error::Gpt(gpt::Error::TooShort));
+        assert!(msg.contains("GPT"), "expected GPT prefix in: {msg}");
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::new(std::io::ErrorKind::Other, "disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "expected cause in: {msg}");
+    }
+
+    #[test]
+    fn error_source_mbr() {
+        use std::error::Error as StdError;
+        let e = Error::Mbr(mbr::Error::TooShort);
+        assert!(e.source().is_some());
+    }
+
+    #[test]
+    fn error_source_gpt() {
+        use std::error::Error as StdError;
+        let e = Error::Gpt(gpt::Error::TooShort);
+        assert!(e.source().is_some());
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_no_partition_table() {
+        use std::error::Error as StdError;
+        assert!(Error::NoPartitionTable.source().is_none());
+    }
+
+    // ── Zero-size image ───────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_file_emits_zero_size_child() {
+        let path = scratch(&[], "empty");
+        let mut f = File::open(&path).unwrap();
+        let tree = detect_and_parse(&mut f).unwrap();
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(tree.children[0].name, "image");
+        assert_eq!(tree.children[0].size, 0);
+        assert!(
+            tree.children[0].file_location.is_none(),
+            "zero-size image should have no file_location"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     /// Protective MBR + valid GPT header. We exercise the fall-through
     /// chain: GPT tries first and succeeds.
     #[test]

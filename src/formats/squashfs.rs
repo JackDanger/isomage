@@ -894,4 +894,204 @@ mod tests {
         let mut c = Cursor::new(&patched);
         assert!(matches!(detect_and_parse(&mut c), Err(Error::BadVersion)));
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(
+            msg.contains("SquashFS") || msg.contains("short"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(
+            msg.contains("magic") || msg.contains("SquashFS"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_version() {
+        let msg = format!("{}", Error::BadVersion);
+        assert!(
+            msg.contains("version") || msg.contains("4.0"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_compressed() {
+        let msg = format!("{}", Error::Compressed);
+        assert!(
+            msg.contains("compress") || msg.contains("codec"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = io::Error::new(io::ErrorKind::Other, "disk");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn error_display_too_deep() {
+        let msg = format!("{}", Error::TooDeep);
+        assert!(
+            msg.contains("depth") || msg.contains("deep") || msg.contains("64"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = io::Error::new(io::ErrorKind::Other, "src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::TooDeep.source().is_none());
+    }
+
+    // ── parse_inode_body variants ─────────────────────────────────────────────
+
+    fn make_inode_common() -> Vec<u8> {
+        // 16-byte common header: type(u16) mode(u16) uid(u16) gid(u16) mtime(u32) ino(u32)
+        // (The common header is parsed by the caller before calling parse_inode_body;
+        // we pass the *body* which starts right after.)
+        Vec::new()
+    }
+
+    #[test]
+    fn parse_inode_body_ldir() {
+        // INODE_LDIR body: nlink(u32) file_size(u32) start_block(u32) parent(u32)
+        //                  i_count(u16) offset(u16) xattr(u32) = 24 bytes
+        let mut body = vec![0u8; 24];
+        body[4..8].copy_from_slice(&99u32.to_le_bytes()); // file_size
+        body[8..12].copy_from_slice(&7u32.to_le_bytes()); // start_block
+        body[20..22].copy_from_slice(&5u16.to_le_bytes()); // offset
+        let inode = parse_inode_body(&body, INODE_LDIR, 4096).expect("LDIR parse failed");
+        assert_eq!(inode.inode_type, INODE_LDIR);
+        assert!(inode.dir_info.is_some());
+        let (start, off, size) = inode.dir_info.unwrap();
+        assert_eq!(start, 7);
+        assert_eq!(off, 5);
+        assert_eq!(size, 99);
+    }
+
+    #[test]
+    fn parse_inode_body_lreg() {
+        // INODE_LREG body (no blocks needed when fragment != 0xFFFF_FFFF):
+        // start_block(u64) file_size(u64) sparse(u64) nlink(u32) fragment(u32)
+        // offset(u32) xattr(u32) = 40 bytes
+        let mut body = vec![0u8; 40];
+        body[..8].copy_from_slice(&42u64.to_le_bytes()); // start_block
+        body[8..16].copy_from_slice(&100u64.to_le_bytes()); // file_size
+                                                            // fragment = 0 (uses fragment table) → nblocks = 100/4096 = 0 → no block_sizes
+        body[28..32].copy_from_slice(&0u32.to_le_bytes()); // fragment = 0 (used, not sentinel)
+        let inode = parse_inode_body(&body, INODE_LREG, 4096).expect("LREG parse failed");
+        assert_eq!(inode.inode_type, INODE_LREG);
+        assert!(inode.reg_info.is_some());
+        let (start, size, _, frag) = inode.reg_info.unwrap();
+        assert_eq!(start, 42);
+        assert_eq!(size, 100);
+        assert_eq!(frag, 0);
+    }
+
+    #[test]
+    fn parse_inode_body_symlink() {
+        // INODE_SYMLINK (type 3): symlink_size(u32) symlink(bytes) — but our
+        // parser ignores symlinks and returns a no-info inode.
+        let body = vec![0u8; 8]; // minimal buffer
+        let inode = parse_inode_body(&body, INODE_SYMLINK, 4096).expect("symlink parse failed");
+        assert_eq!(inode.inode_type, INODE_SYMLINK);
+        assert!(inode.dir_info.is_none());
+        assert!(inode.reg_info.is_none());
+    }
+
+    #[test]
+    fn parse_inode_body_lsymlink() {
+        let body = vec![0u8; 8];
+        let inode = parse_inode_body(&body, INODE_LSYMLINK, 4096).expect("lsymlink parse failed");
+        assert!(inode.dir_info.is_none());
+        assert!(inode.reg_info.is_none());
+    }
+
+    #[test]
+    fn parse_inode_body_unknown_type() {
+        let body = vec![0u8; 4];
+        let inode = parse_inode_body(&body, 99, 4096).expect("unknown type should not error");
+        assert!(inode.dir_info.is_none());
+        assert!(inode.reg_info.is_none());
+    }
+
+    // ── block_count_for ───────────────────────────────────────────────────────
+
+    #[test]
+    fn block_count_for_with_fragment() {
+        // When fragment != 0xFFFF_FFFF, the last partial block is in the fragment
+        // table → nblocks = file_size / block_size (not ceil).
+        let bs = 4096u32;
+        // 8000 bytes: 8000/4096 = 1 (floor); ceil would be 2.
+        assert_eq!(block_count_for(8000, bs, 0), 1);
+        // Exactly one full block: 4096/4096 = 1.
+        assert_eq!(block_count_for(4096, bs, 0), 1);
+        // Zero: 0/4096 = 0.
+        assert_eq!(block_count_for(0, bs, 0), 0);
+    }
+
+    #[test]
+    fn block_count_for_no_fragment() {
+        let bs = 4096u32;
+        // Without fragment (0xFFFF_FFFF), use ceil.
+        assert_eq!(block_count_for(8000, bs, 0xFFFF_FFFF), 2);
+        assert_eq!(block_count_for(4096, bs, 0xFFFF_FFFF), 1);
+        assert_eq!(block_count_for(1, bs, 0xFFFF_FFFF), 1);
+    }
+
+    // ── file_location_for_reg ────────────────────────────────────────────────
+
+    #[test]
+    fn file_location_for_reg_with_fragment_returns_none() {
+        // Fragment used → no file_location.
+        assert!(file_location_for_reg(100, &[0x0100_0000], 0).is_none());
+    }
+
+    #[test]
+    fn file_location_for_reg_multiple_blocks_returns_none() {
+        // Two blocks → no single contiguous location.
+        assert!(file_location_for_reg(100, &[0x0100_0010, 0x0100_0010], 0xFFFF_FFFF).is_none());
+    }
+
+    #[test]
+    fn file_location_for_reg_compressed_block_returns_none() {
+        // Bit 24 of block_sizes not set → compressed → no file_location.
+        assert!(file_location_for_reg(100, &[0x0000_0010], 0xFFFF_FFFF).is_none());
+    }
+
+    #[test]
+    fn file_location_for_reg_success() {
+        // Single uncompressed block with no fragment → returns start_block.
+        let loc = file_location_for_reg(200, &[0x0100_0020], 0xFFFF_FFFF);
+        assert_eq!(loc, Some(200));
+    }
+
+    // ── Big-endian magic bytes ────────────────────────────────────────────────
+
+    #[test]
+    fn be_magic_constant_is_byte_swap_of_le() {
+        // Verify the constants are consistent: MAGIC_BE is the byte-swap of MAGIC_LE.
+        assert_eq!(MAGIC_LE.swap_bytes(), MAGIC_BE);
+    }
 }

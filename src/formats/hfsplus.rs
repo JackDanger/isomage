@@ -1088,4 +1088,129 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], CatalogRecord::Thread { .. }));
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(
+            msg.contains("HFS+") || msg.contains("short"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_magic() {
+        let msg = format!("{}", Error::BadMagic);
+        assert!(
+            msg.contains("magic") || msg.contains("HFS"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_version() {
+        let msg = format!("{}", Error::BadVersion);
+        assert!(
+            msg.contains("version") || msg.contains("HFS"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_catalog() {
+        let msg = format!("{}", Error::BadCatalog);
+        assert!(
+            msg.contains("catalog") || msg.contains("HFS"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_too_deep() {
+        let msg = format!("{}", Error::TooDeep);
+        assert!(
+            msg.contains("deep") || msg.contains("HFS"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::new(std::io::ErrorKind::Other, "disk fail");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk fail"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadMagic.source().is_none());
+        assert!(Error::BadCatalog.source().is_none());
+        assert!(Error::TooDeep.source().is_none());
+    }
+
+    // ── ForkData::first_extent_offset ────────────────────────────────────────
+
+    #[test]
+    fn fork_data_first_extent_offset_zero_block_count_returns_none() {
+        // extents[0].1 == 0 (block count is zero) → returns None.
+        let fd = ForkData {
+            logical_size: 0,
+            total_blocks: 0,
+            extents: [
+                (5, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+            ],
+        };
+        assert!(fd.first_extent_offset(4096).is_none());
+    }
+
+    #[test]
+    fn fork_data_first_extent_offset_nonzero_block_count() {
+        // extents[0] = (start=10, count=3): offset = 10 * block_size.
+        let fd = ForkData {
+            logical_size: 100,
+            total_blocks: 3,
+            extents: [
+                (10, 3),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+            ],
+        };
+        assert_eq!(fd.first_extent_offset(4096), Some(10 * 4096));
+    }
+
+    // ── sort_children_recursive ───────────────────────────────────────────────
+
+    #[test]
+    fn sort_children_recursive_sorts_names() {
+        let mut root = TreeNode::new_directory("/".to_string());
+        root.add_child(TreeNode::new_file("z.txt".to_string(), 0));
+        root.add_child(TreeNode::new_file("a.txt".to_string(), 0));
+        root.add_child(TreeNode::new_file("m.txt".to_string(), 0));
+        sort_children_recursive(&mut root);
+        let names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["a.txt", "m.txt", "z.txt"]);
+    }
 }
