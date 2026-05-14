@@ -635,6 +635,21 @@ mod tests {
         assert!(Error::BadHeader.source().is_none());
     }
 
+    #[test]
+    fn error_from_io_error() {
+        let e = Error::from(std::io::Error::other("tar test"));
+        assert!(matches!(e, Error::Io(_)));
+    }
+
+    #[test]
+    fn scan_entries_non_ustar_first_block_returns_not_tar() {
+        // All-0xFF first block: non-zero, no ustar magic, entries empty → Error::NotTar.
+        let mut data = vec![0xFFu8; 512];
+        data.extend_from_slice(&[0u8; 1024]); // two zero EOF blocks
+        let mut c = Cursor::new(data);
+        assert!(matches!(scan_entries(&mut c), Err(Error::NotTar)));
+    }
+
     // ── parse_octal ───────────────────────────────────────────────────────────
 
     #[test]
