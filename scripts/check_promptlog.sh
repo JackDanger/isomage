@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Check that a diff touching code-tracked paths also adds a file under prompts/.
 #
-# The watched paths (see WATCH_REGEX below) are anything under `src/` and
-# the top-level `Cargo.toml`. Update WATCH_REGEX here if the repo grows
-# new code directories (e.g. a top-level `tests/` directory).
+# The watched paths (see WATCH_REGEX below) are anything under src/, tests/,
+# or scripts/. This is the single source of truth — update it here if the
+# repo grows new code directories.
 #
 # Usage:
 #   scripts/check_promptlog.sh <base> [<head>]      # diff-range mode
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-WATCH_REGEX='^(src/|Cargo\.toml$)'
+WATCH_REGEX='^(src/|tests/|scripts/)'
 
 usage() {
   echo "usage: $0 <base> [<head>]    # diff-range mode (refs or SHAs)" >&2

@@ -1,12 +1,12 @@
 ---
 name: promptlog
-description: Write a sanitized prompt log entry for the current session into prompts/. Required before opening a PR that touches src/ — CI fails without it.
+description: Write a sanitized prompt log entry for the current session into prompts/. Required before opening a PR that touches src/, tests/, or scripts/ — CI fails without it.
 ---
 
 # Skill: Write a Prompt Log Entry
 
-Use this skill whenever a session has changed `src/` or `Cargo.toml`. The
-`prompt-log` job in `.github/workflows/ci.yml` fails any PR that touches
+Use this skill whenever a session has changed `src/`, `tests/`, or `scripts/`.
+The `prompt-log` job in `.github/workflows/ci.yml` fails any PR that touches
 those paths without adding a file under `prompts/`.
 
 **Always invoke this skill before pushing a PR.** Don't ask the user
@@ -15,7 +15,7 @@ said "don't log this."
 
 ## When to use
 
-- Before committing code that touches `src/` (the optional local hook requires it)
+- Before committing code that touches `src/`, `tests/`, or `scripts/` (the optional local hook requires it)
 - Before pushing a PR (CI requires it)
 - At the end of a session
 - Any time the user says "log the prompts" or "record this session"
@@ -29,8 +29,8 @@ said "don't log this."
    git log --oneline origin/main..HEAD
    ```
 
-   If nothing under `src/` or `Cargo.toml` was modified, the CI gate will
-   skip — you don't need a prompt log. Stop here.
+   If nothing under `src/`, `tests/`, or `scripts/` was modified, the CI gate
+   will skip — you don't need a prompt log. Stop here.
 
 2. **Pick the timestamp and slug**:
 
