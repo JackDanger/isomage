@@ -540,4 +540,361 @@ mod tests {
         assert!(docs.is_directory);
         assert_eq!(docs.size, 11);
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_not_tar() {
+        let msg = format!("{}", Error::NotTar);
+        assert!(
+            msg.contains("TAR") || msg.contains("ustar"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_header() {
+        let msg = format!("{}", Error::BadHeader);
+        assert!(
+            msg.contains("header") || msg.contains("TAR"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk read");
+        let msg = format!("{}", Error::Io(io_err));
+        assert!(msg.contains("disk read"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        assert!(Error::Io(io_err).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::NotTar.source().is_none());
+        assert!(Error::BadHeader.source().is_none());
+    }
+
+    // ── parse_octal ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_octal_basic() {
+        assert_eq!(parse_octal(b"00000000755\0"), 0o755);
+        assert_eq!(parse_octal(b"00000001234\0"), 0o1234);
+        assert_eq!(parse_octal(b"\0"), 0);
+    }
+
+    #[test]
+    fn parse_octal_space_terminated() {
+        // Some TAR fields use space instead of NUL to terminate.
+        assert_eq!(parse_octal(b"0000644 "), 0o644);
+    }
+
+    // ── parse_name / entry_name ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_name_nul_terminated() {
+        let mut field = [0u8; 100];
+        field[..7].copy_from_slice(b"foo.txt");
+        assert_eq!(parse_name(&field), "foo.txt");
+    }
+
+    #[test]
+    fn entry_name_with_prefix() {
+        // Build a block where prefix is non-empty; entry_name should concatenate.
+        let mut block = [0u8; 512];
+        block[..7].copy_from_slice(b"foo.txt");
+        block[345..353].copy_from_slice(b"myprefix");
+        block[257..263].copy_from_slice(b"ustar\0");
+        let name = entry_name(&block);
+        assert_eq!(name, "myprefix/foo.txt");
+    }
+
+    // ── parse_pax ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_pax_path_key() {
+        let body = b"22 path=/long/path/to/file\n";
+        let (path, size) = parse_pax(body);
+        assert_eq!(path.as_deref(), Some("/long/path/to/file"));
+        assert!(size.is_none());
+    }
+
+    #[test]
+    fn parse_pax_size_key() {
+        let body = b"13 size=99999\n";
+        let (path, size) = parse_pax(body);
+        assert!(path.is_none());
+        assert_eq!(size, Some(99999));
+    }
+
+    #[test]
+    fn parse_pax_unknown_key_ignored() {
+        let body = b"18 mtime=1234567890\n";
+        let (path, size) = parse_pax(body);
+        assert!(path.is_none());
+        assert!(size.is_none());
+    }
+
+    #[test]
+    fn parse_pax_empty_body() {
+        let (path, size) = parse_pax(b"");
+        assert!(path.is_none());
+        assert!(size.is_none());
+    }
+
+    // ── GNU long name handling ────────────────────────────────────────────────
+
+    fn make_gnu_long_name_tar(long_name: &str, data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Block 1: type 'L' header carrying the long filename.
+        let name_bytes = long_name.as_bytes();
+        let name_padded_blocks = name_bytes.len().div_ceil(512) as u64;
+
+        let mut hdr_l = [0u8; 512];
+        // name field: "././@LongLink"
+        hdr_l[..13].copy_from_slice(b"././@LongLink");
+        // size = name_bytes.len()
+        let size_str = format!("{:011o}\0", name_bytes.len());
+        hdr_l[124..136].copy_from_slice(size_str.as_bytes());
+        // typeflag = 'L'
+        hdr_l[156] = TYPE_GNU_LONG_NAME;
+        // ustar magic
+        hdr_l[257..263].copy_from_slice(b"ustar\0");
+        hdr_l[263..265].copy_from_slice(b"00");
+        // checksum
+        hdr_l[148..156].fill(b' ');
+        let cksum: u32 = hdr_l.iter().map(|&b| b as u32).sum();
+        hdr_l[148..156].copy_from_slice(format!("{:06o}\0 ", cksum).as_bytes());
+        buf.extend_from_slice(&hdr_l);
+
+        // Data blocks for the long name.
+        let mut name_block = vec![0u8; name_padded_blocks as usize * 512];
+        name_block[..name_bytes.len()].copy_from_slice(name_bytes);
+        buf.extend_from_slice(&name_block);
+
+        // Block 3: actual file header (short placeholder name).
+        buf.extend_from_slice(&make_ustar("x", data));
+
+        buf
+    }
+
+    #[test]
+    fn gnu_long_name_overrides_short_name() {
+        let long_name = "a_very_long_directory_name/with/many/components/file.txt";
+        let data = b"content";
+        let tar = make_gnu_long_name_tar(long_name, data);
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        // The file should appear under the long path.
+        let f = root.find_node("/a_very_long_directory_name/with/many/components/file.txt");
+        assert!(f.is_some(), "long-name file should be in tree");
+    }
+
+    // ── GNU long link (type K) ────────────────────────────────────────────────
+
+    fn make_gnu_long_link_tar(target: &str, after_name: &str, after_data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Type 'K' header carrying the symlink target.
+        let target_bytes = target.as_bytes();
+        let target_blocks = target_bytes.len().div_ceil(512);
+
+        let mut hdr_k = [0u8; 512];
+        hdr_k[..13].copy_from_slice(b"././@LongLink");
+        let size_str = format!("{:011o}\0", target_bytes.len());
+        hdr_k[124..136].copy_from_slice(size_str.as_bytes());
+        hdr_k[156] = TYPE_GNU_LONG_LINK;
+        hdr_k[257..263].copy_from_slice(b"ustar\0");
+        hdr_k[263..265].copy_from_slice(b"00");
+        hdr_k[148..156].fill(b' ');
+        let ck: u32 = hdr_k.iter().map(|&b| b as u32).sum();
+        hdr_k[148..156].copy_from_slice(format!("{:06o}\0 ", ck).as_bytes());
+        buf.extend_from_slice(&hdr_k);
+
+        let mut target_block = vec![0u8; target_blocks * 512];
+        target_block[..target_bytes.len()].copy_from_slice(target_bytes);
+        buf.extend_from_slice(&target_block);
+
+        // The regular file that follows.
+        buf.extend_from_slice(&make_ustar(after_name, after_data));
+        buf
+    }
+
+    #[test]
+    fn gnu_long_link_consumed_and_next_entry_parsed() {
+        let tar =
+            make_gnu_long_link_tar("/very/long/symlink/target/path", "real_file.txt", b"data");
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        // real_file.txt should appear; the long-link target is silently dropped.
+        assert!(root.find_node("/real_file.txt").is_some());
+    }
+
+    // ── PAX extended header (type x) ─────────────────────────────────────────
+
+    fn make_pax_tar(pax_path: &str, actual_data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Build the PAX record body.
+        let path_record = format!("{} path={}\n", 7 + pax_path.len(), pax_path);
+        let pax_body = path_record.as_bytes();
+        let pax_blocks = pax_body.len().div_ceil(512);
+
+        let mut pax_hdr = [0u8; 512];
+        let size_str = format!("{:011o}\0", pax_body.len());
+        pax_hdr[124..136].copy_from_slice(size_str.as_bytes());
+        pax_hdr[156] = TYPE_PAX_LOCAL;
+        pax_hdr[257..263].copy_from_slice(b"ustar\0");
+        pax_hdr[263..265].copy_from_slice(b"00");
+        pax_hdr[148..156].fill(b' ');
+        let ck: u32 = pax_hdr.iter().map(|&b| b as u32).sum();
+        pax_hdr[148..156].copy_from_slice(format!("{:06o}\0 ", ck).as_bytes());
+        buf.extend_from_slice(&pax_hdr);
+
+        let mut pax_data = vec![0u8; pax_blocks * 512];
+        pax_data[..pax_body.len()].copy_from_slice(pax_body);
+        buf.extend_from_slice(&pax_data);
+
+        // Regular file with a short placeholder name; PAX overrides it.
+        buf.extend_from_slice(&make_ustar("x", actual_data));
+        buf
+    }
+
+    #[test]
+    fn pax_path_overrides_short_name() {
+        let long_path = "pax/extended/path/to/file.rs";
+        let tar = make_pax_tar(long_path, b"pax data");
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        assert!(
+            root.find_node("/pax/extended/path/to/file.rs").is_some(),
+            "PAX path override should place file at the correct path"
+        );
+    }
+
+    // ── Hard link and symlink type flags ──────────────────────────────────────
+
+    fn make_ustar_with_type(name: &str, typeflag: u8, size: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; 1024]; // one header + one data block
+        let name_bytes = name.as_bytes();
+        buf[..name_bytes.len().min(100)].copy_from_slice(&name_bytes[..name_bytes.len().min(100)]);
+        let size_str = format!("{:011o}\0", size);
+        buf[124..136].copy_from_slice(size_str.as_bytes());
+        buf[156] = typeflag;
+        buf[257..263].copy_from_slice(b"ustar\0");
+        buf[263..265].copy_from_slice(b"00");
+        buf[148..156].fill(b' ');
+        let ck: u32 = buf[..512].iter().map(|&b| b as u32).sum();
+        buf[148..156].copy_from_slice(format!("{:06o}\0 ", ck).as_bytes());
+        buf
+    }
+
+    #[test]
+    fn hard_link_appears_in_tree() {
+        let tar = make_ustar_with_type("link.txt", TYPE_HARD_LINK, 0);
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        assert!(
+            root.find_node("/link.txt").is_some(),
+            "hard link should appear in tree"
+        );
+    }
+
+    #[test]
+    fn symlink_appears_as_zero_byte_file() {
+        let tar = make_ustar_with_type("sym.txt", TYPE_SYMLINK, 0);
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        let n = root
+            .find_node("/sym.txt")
+            .expect("symlink should be in tree");
+        assert!(!n.is_directory);
+    }
+
+    #[test]
+    fn regular_alt_type_is_regular_file() {
+        // TYPE_REGULAR_ALT ('\0') should be treated as a regular file.
+        let tar = make_ustar_with_type("old.txt", TYPE_REGULAR_ALT, 3);
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        let n = root
+            .find_node("/old.txt")
+            .expect("old.txt should be in tree");
+        assert_eq!(n.size, 3);
+        assert!(n.file_location.is_some());
+    }
+
+    // ── Explicit directory type flag ──────────────────────────────────────────
+
+    #[test]
+    fn explicit_dir_entry_is_directory() {
+        let tar = make_ustar_with_type("mydir/", TYPE_DIR, 0);
+        let mut c = Cursor::new(&tar);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        let n = root.find_node("/mydir").expect("mydir should be in tree");
+        assert!(n.is_directory, "TYPE_DIR entry should be a directory");
+    }
+
+    // ── Two consecutive zero blocks = end of archive ──────────────────────────
+
+    #[test]
+    fn two_zero_blocks_end_archive() {
+        // Build: valid header + two zero blocks + another valid header.
+        // The parser should stop at the two zero blocks; the second file is ignored.
+        let file1 = make_ustar("first.txt", b"a");
+        let mut buf = file1;
+        buf.extend_from_slice(&[0u8; 1024]); // two zero blocks = EOF
+        buf.extend_from_slice(&make_ustar("second.txt", b"b"));
+
+        let mut c = Cursor::new(&buf);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        assert!(root.find_node("/first.txt").is_some());
+        assert!(
+            root.find_node("/second.txt").is_none(),
+            "should stop at EOF marker"
+        );
+    }
+
+    /// Build just the raw header+data blocks for one TAR entry (no trailing zero).
+    fn make_ustar_raw(name: &str, data: &[u8]) -> Vec<u8> {
+        let data_blocks = data.len().div_ceil(512);
+        let total = 512 + data_blocks * 512;
+        let mut buf = vec![0u8; total];
+        let name_bytes = name.as_bytes();
+        buf[..name_bytes.len().min(100)].copy_from_slice(&name_bytes[..name_bytes.len().min(100)]);
+        let size_str = format!("{:011o}\0", data.len());
+        buf[124..136].copy_from_slice(size_str.as_bytes());
+        buf[156] = TYPE_REGULAR;
+        buf[257..263].copy_from_slice(b"ustar\0");
+        buf[263..265].copy_from_slice(b"00");
+        buf[148..156].fill(b' ');
+        let ck: u32 = buf[..512].iter().map(|&b| b as u32).sum();
+        buf[148..156].copy_from_slice(format!("{:06o}\0 ", ck).as_bytes());
+        buf[512..512 + data.len()].copy_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn single_zero_block_does_not_stop_parsing() {
+        // One zero block between two entries: the parser keeps going.
+        // Use raw builders (no trailing zero block) so consecutive_zero stays at 1.
+        let mut buf = make_ustar_raw("first.txt", b"a");
+        buf.extend_from_slice(&[0u8; 512]); // single zero block — not EOF (consecutive_zero=1)
+        buf.extend_from_slice(&make_ustar_raw("second.txt", b"b"));
+        buf.extend_from_slice(&[0u8; 1024]); // proper EOF (consecutive_zero reaches 2)
+
+        let mut c = Cursor::new(&buf);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        assert!(root.find_node("/first.txt").is_some());
+        assert!(root.find_node("/second.txt").is_some());
+    }
 }

@@ -1160,4 +1160,299 @@ mod tests {
             "large file has no single-run location"
         );
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_too_short() {
+        let msg = format!("{}", Error::TooShort);
+        assert!(
+            msg.contains("short") || msg.contains("superblock"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_bad_superblock() {
+        let msg = format!("{}", Error::BadSuperblock);
+        assert!(
+            msg.contains("superblock") || msg.contains("0xEF53"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io = std::io::Error::new(std::io::ErrorKind::Other, "disk fail");
+        let msg = format!("{}", Error::Io(io));
+        assert!(msg.contains("disk fail"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        assert!(Error::Io(io).source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::TooShort.source().is_none());
+        assert!(Error::BadSuperblock.source().is_none());
+    }
+
+    // ── Superblock sanity checks ──────────────────────────────────────────────
+
+    fn make_corrupt_image<F: Fn(&mut Vec<u8>)>(corrupt: F) -> Vec<u8> {
+        let mut img = make_ext2_image();
+        corrupt(&mut img);
+        img
+    }
+
+    #[test]
+    fn rejects_log_block_size_too_large() {
+        let img = make_corrupt_image(|img| {
+            // s_log_block_size at offset 1024+24: set to 7 (would be 128 KiB).
+            img[1024 + 24..1024 + 28].copy_from_slice(&7u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    #[test]
+    fn rejects_blocks_per_group_zero() {
+        let img = make_corrupt_image(|img| {
+            img[1024 + 32..1024 + 36].copy_from_slice(&0u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    #[test]
+    fn rejects_blocks_count_zero() {
+        let img = make_corrupt_image(|img| {
+            img[1024 + 4..1024 + 8].copy_from_slice(&0u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    #[test]
+    fn rejects_inodes_per_group_zero() {
+        let img = make_corrupt_image(|img| {
+            img[1024 + 40..1024 + 44].copy_from_slice(&0u32.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    // ── Rev_level 0 path ──────────────────────────────────────────────────────
+
+    #[test]
+    fn rev_level_zero_uses_defaults() {
+        // Set rev_level = 0; parser should use fixed 128-byte inodes, no extents.
+        let mut img = make_ext2_image();
+        img[1024 + 76..1024 + 80].copy_from_slice(&0u32.to_le_bytes());
+        // Also zero the feature_incompat field to be safe.
+        img[1024 + 96..1024 + 100].copy_from_slice(&0u32.to_le_bytes());
+        let mut c = cursor_of(&img);
+        // Should still parse OK; rev_level 0 just sets defaults.
+        let root = detect_and_parse(&mut c).expect("rev_level 0 should still parse");
+        assert_eq!(root.name, "/");
+    }
+
+    // ── Inode size > block_size rejects ───────────────────────────────────────
+
+    #[test]
+    fn rejects_inode_size_larger_than_block_size() {
+        // inode_size = 4096, block_size = 1024 → invalid.
+        let img = make_corrupt_image(|img| {
+            img[1024 + 88..1024 + 90].copy_from_slice(&4096u16.to_le_bytes());
+        });
+        let mut c = cursor_of(&img);
+        assert!(detect_and_parse(&mut c).is_err());
+    }
+
+    // ── Extent tree path ──────────────────────────────────────────────────────
+
+    fn make_ext4_extent_image() -> Vec<u8> {
+        // Like make_ext2_image but the file inode uses an extent tree.
+        const BS: usize = 1024;
+        const TOTAL_BLOCKS: usize = 256;
+        const IMAGE_SIZE: usize = TOTAL_BLOCKS * BS;
+        const INODE_SIZE: usize = 128;
+        const INODES_PER_GROUP: usize = 256;
+        const BLOCK_BITMAP_BLK: usize = 3;
+        const INODE_BITMAP_BLK: usize = 4;
+        const INODE_TABLE_BLK: usize = 5;
+        const ROOT_DATA_BLK: usize = 6;
+        const FILE_DATA_BLK: usize = 7;
+        const ROOT_INUM: usize = 2;
+        const FILE_INUM: usize = 3;
+
+        let mut img = make_ext2_image(); // start from the classical image
+
+        // Enable EXT4_EXTENTS_FL on the file inode (#3).
+        let inode_base = INODE_TABLE_BLK * BS;
+        let file_off = inode_base + (FILE_INUM - 1) * INODE_SIZE;
+        // Set i_flags = EXT4_EXTENTS_FL (0x80000)
+        img[file_off + 32..file_off + 36].copy_from_slice(&0x0008_0000u32.to_le_bytes());
+
+        // Build an extent tree in i_block (60 bytes at file_off+40).
+        // Header: magic=0xF30A, entries=1, max=4, depth=0, generation=0
+        let extent_area = &mut img[file_off + 40..file_off + 100];
+        extent_area[..2].copy_from_slice(&0xF30Au16.to_le_bytes()); // magic
+        extent_area[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries
+        extent_area[4..6].copy_from_slice(&4u16.to_le_bytes()); // max
+        extent_area[6..8].copy_from_slice(&0u16.to_le_bytes()); // depth = 0 (leaf)
+        extent_area[8..12].copy_from_slice(&0u32.to_le_bytes()); // generation
+                                                                 // Leaf extent at offset 12: ee_block=0, ee_len=1, ee_start_hi=0, ee_start_lo=FILE_DATA_BLK
+        extent_area[12..16].copy_from_slice(&0u32.to_le_bytes()); // ee_block (logical)
+        extent_area[16..18].copy_from_slice(&1u16.to_le_bytes()); // ee_len = 1 block
+        extent_area[18..20].copy_from_slice(&0u16.to_le_bytes()); // ee_start_hi
+        extent_area[20..24].copy_from_slice(&(FILE_DATA_BLK as u32).to_le_bytes()); // ee_start_lo
+
+        img
+    }
+
+    #[test]
+    fn parse_ext4_extent_tree_file() {
+        let img = make_ext4_extent_image();
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("extent tree parse failed");
+        let file = root
+            .children
+            .iter()
+            .find(|n| n.name == "hello.txt")
+            .unwrap();
+        assert_eq!(file.size, 12);
+        // Single extent → file_location should be set.
+        assert!(
+            file.file_location.is_some(),
+            "single-extent file should have file_location"
+        );
+    }
+
+    // ── parse_extent_header with bad magic ───────────────────────────────────
+
+    #[test]
+    fn parse_extent_header_bad_magic_returns_none() {
+        let mut data = vec![0u8; 60];
+        data[0..2].copy_from_slice(&0xDEADu16.to_le_bytes()); // wrong magic
+        assert!(parse_extent_header(&data).is_none());
+    }
+
+    #[test]
+    fn parse_extent_header_too_short_returns_none() {
+        let data = vec![0u8; 4]; // < 12 bytes required
+        assert!(parse_extent_header(&data).is_none());
+    }
+
+    // ── Inline data (EXT4_INLINE_DATA_FL) ────────────────────────────────────
+
+    #[test]
+    fn inline_data_file_has_no_location() {
+        let mut img = make_ext2_image();
+        const INODE_TABLE_BLK: usize = 5;
+        const BS: usize = 1024;
+        const INODE_SIZE: usize = 128;
+        const FILE_INUM: usize = 3;
+        let file_off = INODE_TABLE_BLK * BS + (FILE_INUM - 1) * INODE_SIZE;
+        // Set EXT4_INLINE_DATA_FL (bit 28) in i_flags.
+        let flags: u32 = 0x1000_0000;
+        img[file_off + 32..file_off + 36].copy_from_slice(&flags.to_le_bytes());
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("inline data parse failed");
+        let file = root
+            .children
+            .iter()
+            .find(|n| n.name == "hello.txt")
+            .unwrap();
+        assert!(
+            file.file_location.is_none(),
+            "inline-data file should have no file_location"
+        );
+    }
+
+    // ── Symlink inode in tree ────────────────────────────────────────────────
+
+    fn make_ext2_with_symlink() -> Vec<u8> {
+        // Extend the base image: add a symlink inode (#4) to the root dir.
+        const BS: usize = 1024;
+        const INODE_TABLE_BLK: usize = 5;
+        const INODE_SIZE: usize = 128;
+        const ROOT_DATA_BLK: usize = 6;
+        const SYMLINK_INUM: usize = 4;
+
+        let mut img = make_ext2_image();
+
+        // Set up symlink inode #4 at index 3 in the inode table.
+        let symlink_off = INODE_TABLE_BLK * BS + (SYMLINK_INUM - 1) * INODE_SIZE;
+        let mode: u16 = S_IFLNK | 0o777;
+        img[symlink_off..symlink_off + 2].copy_from_slice(&mode.to_le_bytes());
+        img[symlink_off + 4..symlink_off + 8].copy_from_slice(&7u32.to_le_bytes()); // size=7 "foo/bar"
+
+        // Add a new directory entry for "link" → inode 4.
+        // We'll insert it after the existing entries in the root data block.
+        // Existing entries end at offset 24+9=33, rounded up to 36.
+        // We need to shrink the last entry's rec_len to make room.
+        let dir_base = ROOT_DATA_BLK * BS;
+        // The last entry (hello.txt at offset 24) currently spans to end of block.
+        // Resize it to fit exactly: name_len=9 → rec_len=20 (8 header + 9 name + 3 pad).
+        let new_rec_len: u16 = 20;
+        img[dir_base + 24 + 4..dir_base + 24 + 6].copy_from_slice(&new_rec_len.to_le_bytes());
+
+        // New entry at offset 44: "link" → inode 4.
+        let e_off = 44;
+        let e_rec: u16 = (BS - e_off) as u16;
+        img[dir_base + e_off..dir_base + e_off + 4]
+            .copy_from_slice(&(SYMLINK_INUM as u32).to_le_bytes());
+        img[dir_base + e_off + 4..dir_base + e_off + 6].copy_from_slice(&e_rec.to_le_bytes());
+        img[dir_base + e_off + 6] = 4; // name_len = "link"
+        img[dir_base + e_off + 7] = 7; // file_type = symlink
+        img[dir_base + e_off + 8..dir_base + e_off + 12].copy_from_slice(b"link");
+
+        img
+    }
+
+    #[test]
+    fn symlink_appears_in_tree() {
+        let img = make_ext2_with_symlink();
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("symlink image parse failed");
+        let link = root.find_node("/link");
+        assert!(link.is_some(), "symlink should appear in the tree");
+        let link = link.unwrap();
+        assert!(!link.is_directory);
+        // Symlinks don't get file_location.
+        assert!(link.file_location.is_none());
+    }
+
+    // ── Non-contiguous blocks → no file_location ─────────────────────────────
+
+    #[test]
+    fn discontiguous_blocks_no_file_location() {
+        let mut img = make_ext2_image();
+        const INODE_TABLE_BLK: usize = 5;
+        const BS: usize = 1024;
+        const INODE_SIZE: usize = 128;
+        const FILE_INUM: usize = 3;
+        let file_off = INODE_TABLE_BLK * BS + (FILE_INUM - 1) * INODE_SIZE;
+        // Make file large enough to need 2 blocks, but make them non-contiguous.
+        img[file_off + 4..file_off + 8].copy_from_slice(&(2048u32).to_le_bytes()); // 2 KB
+                                                                                   // i_block[0] = 7 (existing), i_block[1] = 9 (skipping 8 → discontiguous).
+        img[file_off + 44..file_off + 48].copy_from_slice(&9u32.to_le_bytes()); // i_block[1] = 9
+        let mut c = cursor_of(&img);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        let file = root
+            .children
+            .iter()
+            .find(|n| n.name == "hello.txt")
+            .unwrap();
+        assert!(
+            file.file_location.is_none(),
+            "discontiguous blocks should yield no file_location"
+        );
+    }
 }

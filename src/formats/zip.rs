@@ -630,4 +630,381 @@ mod tests {
         assert!(docs.is_directory);
         assert_eq!(docs.size, 11); // rolled up from readme.txt
     }
+
+    // ── Error Display / source ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_not_zip() {
+        let msg = format!("{}", Error::NotZip);
+        assert!(msg.contains("ZIP"), "expected 'ZIP' in: {msg}");
+    }
+
+    #[test]
+    fn error_display_bad_central_directory() {
+        let msg = format!("{}", Error::BadCentralDirectory);
+        assert!(
+            msg.contains("central directory") || msg.contains("central"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk fail");
+        let msg = format!("{}", Error::Io(io_err));
+        assert!(msg.contains("disk fail"), "expected cause in: {msg}");
+    }
+
+    #[test]
+    fn error_source_io() {
+        use std::error::Error as StdError;
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        let e = Error::Io(io_err);
+        assert!(e.source().is_some());
+    }
+
+    #[test]
+    fn error_source_non_io() {
+        use std::error::Error as StdError;
+        assert!(Error::NotZip.source().is_none());
+        assert!(Error::BadCentralDirectory.source().is_none());
+    }
+
+    // ── parse_zip64_extra ─────────────────────────────────────────────────────
+
+    #[test]
+    fn zip64_extra_decodes_offset() {
+        // Build a ZIP64 extra field with tag=0x0001, containing only the offset
+        // (both comp and uncomp are not sentinel, only offset is 0xFFFF_FFFF).
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x0001u16.to_le_bytes()); // tag
+        extra.extend_from_slice(&8u16.to_le_bytes()); // size = 8 bytes (just offset)
+        extra.extend_from_slice(&0xDEAD_BEEF_0000_0000u64.to_le_bytes()); // offset
+
+        // only offset is sentinel
+        let (comp, uncomp, off) = parse_zip64_extra(
+            &extra,
+            100u64,         // comp not sentinel → unchanged
+            200u64,         // uncomp not sentinel → unchanged
+            0xFFFF_FFFFu64, // offset is sentinel → replaced
+        );
+        assert_eq!(comp, 100);
+        assert_eq!(uncomp, 200);
+        assert_eq!(off, 0xDEAD_BEEF_0000_0000u64);
+    }
+
+    #[test]
+    fn zip64_extra_decodes_uncomp_and_comp() {
+        // Both uncomp and comp are sentinel; field has 16 bytes.
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x0001u16.to_le_bytes()); // tag
+        extra.extend_from_slice(&16u16.to_le_bytes()); // size = 16
+        extra.extend_from_slice(&1234u64.to_le_bytes()); // uncomp override
+        extra.extend_from_slice(&5678u64.to_le_bytes()); // comp override
+
+        let (comp, uncomp, off) = parse_zip64_extra(
+            &extra,
+            0xFFFF_FFFFu64, // comp sentinel
+            0xFFFF_FFFFu64, // uncomp sentinel
+            42u64,          // offset not sentinel → unchanged
+        );
+        assert_eq!(uncomp, 1234);
+        assert_eq!(comp, 5678);
+        assert_eq!(off, 42);
+    }
+
+    #[test]
+    fn zip64_extra_unknown_tag_ignored() {
+        // Tag 0x0002 should be skipped.
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x0002u16.to_le_bytes());
+        extra.extend_from_slice(&4u16.to_le_bytes());
+        extra.extend_from_slice(&0u32.to_le_bytes()); // 4 bytes of garbage
+
+        let (comp, uncomp, off) = parse_zip64_extra(&extra, 1, 2, 3);
+        assert_eq!((comp, uncomp, off), (1, 2, 3));
+    }
+
+    // ── Compressed entry → no file_location ──────────────────────────────────
+
+    fn make_deflate_zip(name: &[u8], data: &[u8]) -> Vec<u8> {
+        // Same as make_stored_zip but method = 8 (DEFLATE).
+        // The data is stored raw (not actually deflated) so the lengths work out
+        // numerically — this only tests the parser's method-dispatch logic.
+        const METHOD_DEFLATE: u16 = 8;
+        let mut z = Vec::new();
+        let lh_offset = z.len() as u32;
+        z.extend_from_slice(&LFH_SIG.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&METHOD_DEFLATE.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes()); // crc
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(name);
+        z.extend_from_slice(data);
+
+        let cd_offset = z.len() as u32;
+        z.extend_from_slice(&CDR_SIG.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&METHOD_DEFLATE.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&lh_offset.to_le_bytes());
+        z.extend_from_slice(name);
+
+        let cd_size = z.len() as u32 - cd_offset;
+        z.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&1u16.to_le_bytes());
+        z.extend_from_slice(&1u16.to_le_bytes());
+        z.extend_from_slice(&cd_size.to_le_bytes());
+        z.extend_from_slice(&cd_offset.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z
+    }
+
+    #[test]
+    fn compressed_entry_has_no_file_location() {
+        let zip = make_deflate_zip(b"data.bin", b"\x78\x9C\x03\x00\x00\x00\x00\x01");
+        let mut c = Cursor::new(&zip);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        assert_eq!(root.children.len(), 1);
+        let f = &root.children[0];
+        assert_eq!(f.name, "data.bin");
+        // Compressed entries must NOT have file_location (data is not raw).
+        assert!(
+            f.file_location.is_none(),
+            "compressed entry should have no file_location"
+        );
+    }
+
+    // ── Explicit directory entry in CD ────────────────────────────────────────
+
+    fn make_zip_with_dir_entry() -> Vec<u8> {
+        // A ZIP with one explicit directory CD entry (name ends with '/').
+        let dir_name = b"mydir/";
+        let mut z = Vec::new();
+
+        // LFH for the dir entry.
+        let lh_offset = 0u32;
+        z.extend_from_slice(&LFH_SIG.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes()); // stored
+        z.extend_from_slice(&0u32.to_le_bytes()); // time+date
+        z.extend_from_slice(&0u32.to_le_bytes()); // crc
+        z.extend_from_slice(&0u32.to_le_bytes()); // comp size = 0
+        z.extend_from_slice(&0u32.to_le_bytes()); // uncomp size = 0
+        z.extend_from_slice(&(dir_name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(dir_name);
+
+        let cd_offset = z.len() as u32;
+        z.extend_from_slice(&CDR_SIG.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes()); // stored
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&(dir_name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes()); // extra
+        z.extend_from_slice(&0u16.to_le_bytes()); // comment
+        z.extend_from_slice(&0u16.to_le_bytes()); // disk start
+        z.extend_from_slice(&0u16.to_le_bytes()); // int attr
+        z.extend_from_slice(&0u32.to_le_bytes()); // ext attr
+        z.extend_from_slice(&lh_offset.to_le_bytes());
+        z.extend_from_slice(dir_name);
+
+        let cd_size = z.len() as u32 - cd_offset;
+        z.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&1u16.to_le_bytes());
+        z.extend_from_slice(&1u16.to_le_bytes());
+        z.extend_from_slice(&cd_size.to_le_bytes());
+        z.extend_from_slice(&cd_offset.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z
+    }
+
+    #[test]
+    fn explicit_dir_entry_is_directory() {
+        let zip = make_zip_with_dir_entry();
+        let mut c = Cursor::new(&zip);
+        let root = detect_and_parse(&mut c).expect("parse failed");
+        // "mydir" should appear as a directory node.
+        assert_eq!(root.children.len(), 1);
+        let dir = &root.children[0];
+        assert_eq!(dir.name, "mydir");
+        assert!(dir.is_directory, "explicit dir entry should be a directory");
+    }
+
+    // ── parse_central_directory error paths ───────────────────────────────────
+
+    #[test]
+    fn parse_cd_truncated_fixed_header_returns_error() {
+        // CD buffer starts with CDR_SIG but is too short for the fixed fields.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&CDR_SIG.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 20]); // only 24 bytes total, need 46
+        assert!(matches!(
+            parse_central_directory(&buf),
+            Err(Error::BadCentralDirectory)
+        ));
+    }
+
+    #[test]
+    fn parse_cd_truncated_name_returns_error() {
+        // Valid fixed header but name_len exceeds remaining buffer.
+        let mut buf = vec![0u8; 46];
+        buf[..4].copy_from_slice(&CDR_SIG.to_le_bytes());
+        // name_len at offset 28 = 100, but only 0 bytes follow
+        buf[28..30].copy_from_slice(&100u16.to_le_bytes());
+        assert!(matches!(
+            parse_central_directory(&buf),
+            Err(Error::BadCentralDirectory)
+        ));
+    }
+
+    // ── local_data_offset with bad LFH signature ──────────────────────────────
+
+    #[test]
+    fn bad_lfh_sig_gives_no_file_location() {
+        // Build a ZIP where the LFH has a corrupted signature.
+        // The CD still points to offset 0, but reading it yields no file_location.
+        let name = b"f.txt";
+        let data = b"data";
+        let mut z = make_stored_zip(name, data);
+        // Corrupt the LFH signature at offset 0.
+        z[0] = 0x00;
+        z[1] = 0x00;
+        let mut c = Cursor::new(&z);
+        // detect_and_parse should still succeed (EOCD is valid), but the file
+        // will have no file_location because local_data_offset returns None.
+        let root = detect_and_parse(&mut c).expect("should still parse");
+        let f = root.find_node("/f.txt").expect("f.txt should exist");
+        assert!(
+            f.file_location.is_none(),
+            "bad LFH sig should yield no file_location"
+        );
+    }
+
+    // ── detect_and_parse with cd_end overflow ─────────────────────────────────
+
+    #[test]
+    fn detect_and_parse_rejects_cd_beyond_eof() {
+        // Build a ZIP where the EOCD reports a cd_offset so large that
+        // cd_offset + cd_size > file_len.
+        let mut zip = make_stored_zip(b"x.txt", b"hi");
+        // EOCD is at the end. Find it by scanning backwards for the sig.
+        let sig_bytes = EOCD_SIG.to_le_bytes();
+        let pos = zip.windows(4).rposition(|w| w == sig_bytes).unwrap();
+        // Overwrite cd_offset (EOCD bytes 16-19) with a huge value.
+        zip[pos + 16..pos + 20].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+        let mut c = Cursor::new(&zip);
+        assert!(matches!(
+            detect_and_parse(&mut c),
+            Err(Error::BadCentralDirectory)
+        ));
+    }
+
+    // ── ZIP64 EOCD path ───────────────────────────────────────────────────────
+
+    #[test]
+    fn find_eocd_zip64_path() {
+        // Build a minimal ZIP64 archive: LFH + data + CD + EOCD64 locator + EOCD64 + EOCD
+        // where EOCD has cd_offset=0xFFFF_FFFF (sentinel) to trigger ZIP64 path.
+        let name = b"a.txt";
+        let data = b"zip64 test";
+
+        let mut z: Vec<u8> = Vec::new();
+
+        // LFH
+        let lh_offset = z.len() as u64;
+        z.extend_from_slice(&LFH_SIG.to_le_bytes());
+        z.extend_from_slice(&45u16.to_le_bytes()); // version needed for ZIP64
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&METHOD_STORED.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes()); // crc
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(name);
+        z.extend_from_slice(data);
+
+        // Central directory record
+        let cd_start = z.len() as u64;
+        z.extend_from_slice(&CDR_SIG.to_le_bytes());
+        z.extend_from_slice(&45u16.to_le_bytes());
+        z.extend_from_slice(&45u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&METHOD_STORED.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes()); // extra
+        z.extend_from_slice(&0u16.to_le_bytes()); // comment
+        z.extend_from_slice(&0u16.to_le_bytes()); // disk start
+        z.extend_from_slice(&0u16.to_le_bytes()); // int attr
+        z.extend_from_slice(&0u32.to_le_bytes()); // ext attr
+        z.extend_from_slice(&(lh_offset as u32).to_le_bytes());
+        z.extend_from_slice(name);
+        let cd_size = z.len() as u64 - cd_start;
+
+        // EOCD64 record (56 bytes)
+        let eocd64_abs = z.len() as u64;
+        z.extend_from_slice(&EOCD64_SIG.to_le_bytes());
+        z.extend_from_slice(&44u64.to_le_bytes()); // size of EOCD64 remaining = 44
+        z.extend_from_slice(&45u16.to_le_bytes()); // version made by
+        z.extend_from_slice(&45u16.to_le_bytes()); // version needed
+        z.extend_from_slice(&0u32.to_le_bytes()); // disk number
+        z.extend_from_slice(&0u32.to_le_bytes()); // disk with CD start
+        z.extend_from_slice(&1u64.to_le_bytes()); // entries on disk
+        z.extend_from_slice(&1u64.to_le_bytes()); // total entries
+        z.extend_from_slice(&cd_size.to_le_bytes()); // CD size
+        z.extend_from_slice(&cd_start.to_le_bytes()); // CD offset
+
+        // EOCD64 locator (20 bytes)
+        z.extend_from_slice(&EOCD64_LOCATOR_SIG.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes()); // disk with EOCD64
+        z.extend_from_slice(&eocd64_abs.to_le_bytes()); // offset of EOCD64
+        z.extend_from_slice(&1u32.to_le_bytes()); // total disks
+
+        // EOCD with sentinel cd_offset to trigger ZIP64 path
+        z.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes()); // disk
+        z.extend_from_slice(&0u16.to_le_bytes()); // CD disk
+        z.extend_from_slice(&0xFFFFu16.to_le_bytes()); // entries = sentinel
+        z.extend_from_slice(&0xFFFFu16.to_le_bytes()); // total entries = sentinel
+        z.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // cd_size = sentinel
+        z.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // cd_offset = sentinel
+        z.extend_from_slice(&0u16.to_le_bytes()); // comment len
+
+        let mut c = Cursor::new(&z);
+        let root = detect_and_parse(&mut c).expect("ZIP64 parse failed");
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "a.txt");
+    }
 }
