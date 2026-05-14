@@ -820,7 +820,10 @@ mod tests {
 
     #[test]
     fn parse_boot_sector_too_short() {
-        assert!(matches!(parse_boot_sector(&[0u8; 10]), Err(Error::TooShort)));
+        assert!(matches!(
+            parse_boot_sector(&[0u8; 10]),
+            Err(Error::TooShort)
+        ));
     }
 
     #[test]
@@ -838,7 +841,10 @@ mod tests {
         // bytes_per_sector = 0 (invalid)
         data[11..13].copy_from_slice(&0u16.to_le_bytes());
         data[13] = 8; // sectors_per_cluster
-        assert!(matches!(parse_boot_sector(&data), Err(Error::BadClusterSize)));
+        assert!(matches!(
+            parse_boot_sector(&data),
+            Err(Error::BadClusterSize)
+        ));
     }
 
     #[test]
@@ -847,7 +853,10 @@ mod tests {
         data[3..11].copy_from_slice(NTFS_OEM_ID);
         data[11..13].copy_from_slice(&512u16.to_le_bytes()); // valid sector size
         data[13] = 0; // sectors_per_cluster = 0 (invalid)
-        assert!(matches!(parse_boot_sector(&data), Err(Error::BadClusterSize)));
+        assert!(matches!(
+            parse_boot_sector(&data),
+            Err(Error::BadClusterSize)
+        ));
     }
 
     // ── Minimal in-memory NTFS image builder ──────────────────────────────

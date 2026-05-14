@@ -1201,6 +1201,60 @@ mod tests {
         assert_eq!(fd.first_extent_offset(4096), Some(10 * 4096));
     }
 
+    // ── From<io::Error> ──────────────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io = std::io::Error::other("disk");
+        let err = Error::from(io);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── VolumeHeader::from_bytes error paths ─────────────────────────────────
+
+    #[test]
+    fn volume_header_from_bytes_too_short() {
+        assert!(matches!(
+            VolumeHeader::from_bytes(&[0u8; 10]),
+            Err(Error::TooShort)
+        ));
+    }
+
+    #[test]
+    fn volume_header_from_bytes_bad_magic() {
+        let mut buf = vec![0u8; VOLUME_HEADER_SIZE];
+        buf[0..2].copy_from_slice(&0x1234u16.to_be_bytes()); // wrong signature
+        buf[2..4].copy_from_slice(&4u16.to_be_bytes()); // version=4
+        assert!(matches!(
+            VolumeHeader::from_bytes(&buf),
+            Err(Error::BadMagic)
+        ));
+    }
+
+    // ── ForkData::is_single_extent zero total_blocks ─────────────────────────
+
+    #[test]
+    fn fork_data_is_single_extent_zero_total_blocks_returns_false() {
+        let fd = ForkData {
+            logical_size: 0,
+            total_blocks: 0,
+            extents: [(0, 0); 8],
+        };
+        assert!(!fd.is_single_extent());
+    }
+
+    // ── BTreeHeader::from_bytes ───────────────────────────────────────────────
+
+    #[test]
+    fn btree_header_from_bytes_parses_fields() {
+        let mut buf = vec![0u8; 106];
+        buf[10..14].copy_from_slice(&42u32.to_be_bytes()); // first_leaf_node
+        buf[18..20].copy_from_slice(&512u16.to_be_bytes()); // node_size
+        let hdr = BTreeHeader::from_bytes(&buf);
+        assert_eq!(hdr.first_leaf_node, 42);
+        assert_eq!(hdr.node_size, 512);
+    }
+
     // ── sort_children_recursive ───────────────────────────────────────────────
 
     #[test]

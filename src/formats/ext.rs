@@ -1202,6 +1202,83 @@ mod tests {
         assert!(Error::BadSuperblock.source().is_none());
     }
 
+    // ── From<io::Error> ──────────────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io = std::io::Error::other("disk");
+        let err = Error::from(io);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── Superblock::desc_size_effective with INCOMPAT_64BIT ──────────────────
+
+    #[test]
+    fn desc_size_effective_returns_desc_size_when_64bit() {
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 0,
+            log_block_size: 2, // 4 KiB blocks
+            inode_size: 256,
+            feature_incompat: INCOMPAT_64BIT,
+            desc_size: 64,
+        };
+        assert_eq!(sb.desc_size_effective(), 64);
+    }
+
+    // ── detect_and_parse error paths ─────────────────────────────────────────
+
+    #[test]
+    fn detect_and_parse_too_short_for_superblock() {
+        // Magic at the right place, but image too short for read_superblock (264 bytes needed).
+        let mut img = vec![0u8; 1100];
+        img[1024 + 56..1024 + 58].copy_from_slice(&EXT_MAGIC.to_le_bytes());
+        let mut c = Cursor::new(img);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn detect_and_parse_bad_superblock_magic() {
+        let img = vec![0u8; 2048]; // enough bytes, magic = 0x0000 (wrong)
+        let mut c = Cursor::new(img);
+        assert!(matches!(
+            detect_and_parse(&mut c),
+            Err(Error::BadSuperblock)
+        ));
+    }
+
+    // ── Inode::file_type_char ─────────────────────────────────────────────────
+
+    #[test]
+    fn inode_file_type_char_char_device() {
+        // S_IFCHR = 0x2000; (0x2000 & S_IFMT) >> 12 = 2
+        let inode = Inode {
+            mode: 0x2000,
+            size: 0,
+            flags: 0,
+            i_block: [0; 15],
+        };
+        assert_eq!(inode.file_type_char(), 2);
+    }
+
+    // ── read_inode with inode_num == 0 ────────────────────────────────────────
+
+    #[test]
+    fn read_inode_with_zero_num_returns_bad_superblock() {
+        let img = make_ext2_image();
+        let mut c = Cursor::new(img);
+        let sb = Superblock {
+            inodes_per_group: 256,
+            first_data_block: 1,
+            log_block_size: 0,
+            inode_size: 128,
+            feature_incompat: INCOMPAT_FILETYPE,
+            desc_size: 32,
+        };
+        let result = read_inode(&mut c, &sb, 0, 0);
+        assert!(matches!(result, Err(Error::BadSuperblock)));
+    }
+
     // ── Superblock sanity checks ──────────────────────────────────────────────
 
     fn make_corrupt_image<F: Fn(&mut Vec<u8>)>(corrupt: F) -> Vec<u8> {
