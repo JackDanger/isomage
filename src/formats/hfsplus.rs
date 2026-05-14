@@ -553,6 +553,49 @@ fn parse_leaf_node_records(
 
 // ── Tree construction ──────────────────────────────────────────────────────
 
+/// Navigate a tree by a slice of directory-name segments and return a
+/// mutable reference to the matching node, or `None` if not found.
+fn find_by_path_mut<'a>(node: &'a mut TreeNode, path: &[String]) -> Option<&'a mut TreeNode> {
+    if path.is_empty() {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if child.is_directory && child.name == path[0] {
+            return find_by_path_mut(child, &path[1..]);
+        }
+    }
+    None
+}
+
+/// Build the path (list of directory names from root) for a CNID by
+/// following the `folder_map` chain.
+fn cnid_path(cnid: u32, folder_map: &std::collections::HashMap<u32, (String, u32)>) -> Vec<String> {
+    if cnid == HFS_ROOT_FOLDER_CNID {
+        return vec![];
+    }
+    let mut path = Vec::new();
+    let mut cur = cnid;
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if guard > 1000 {
+            break; // cycle guard
+        }
+        match folder_map.get(&cur) {
+            Some((name, parent)) => {
+                path.push(name.clone());
+                if *parent == HFS_ROOT_FOLDER_CNID || *parent == 0 {
+                    break;
+                }
+                cur = *parent;
+            }
+            None => break,
+        }
+    }
+    path.reverse();
+    path
+}
+
 /// Build a [`TreeNode`] tree from the flat list of catalog records.
 ///
 /// HFS+ uses catalog node IDs (CNIDs) as stable directory identifiers:
@@ -653,12 +696,17 @@ fn build_tree(records: &[CatalogRecord], _block_size: u64) -> TreeNode {
         remaining = still_pending;
     }
 
-    // Attach files to their parents.
+    // Attach files to their parents.  After Pass 4 only the root node
+    // remains in `nodes`; subdirectory nodes were removed and nested
+    // inside it.  Resolve each parent CNID to its path in the tree and
+    // navigate there to attach the file.
+    let root_node = nodes.get_mut(&HFS_ROOT_FOLDER_CNID).unwrap();
     for (parent_cnid, file_node) in file_items {
-        if let Some(parent) = nodes.get_mut(&parent_cnid) {
+        let path = cnid_path(parent_cnid, &folder_map);
+        if let Some(parent) = find_by_path_mut(root_node, &path) {
             parent.add_child(file_node);
         }
-        // If the parent doesn't exist (orphan or CNID not in our map), skip.
+        // If path not found (orphan / corrupted image), silently drop.
     }
 
     // Sort children alphabetically to produce a stable output order.
@@ -845,5 +893,199 @@ mod tests {
         assert_eq!(tree.name, "/");
         assert!(tree.is_directory);
         assert!(tree.children.is_empty(), "empty catalog → no children");
+    }
+
+    // ── build_tree ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_tree_single_file_in_root() {
+        let records = vec![CatalogRecord::File {
+            parent_cnid: HFS_ROOT_FOLDER_CNID, // 2
+            name: "hello.txt".to_string(),
+            cnid: 10,
+            file_length: 42,
+            file_location: Some(4096),
+        }];
+        let root = build_tree(&records, 4096);
+        assert_eq!(root.name, "/");
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "hello.txt");
+        assert_eq!(root.children[0].size, 42);
+    }
+
+    #[test]
+    fn build_tree_nested_directory() {
+        let records = vec![
+            CatalogRecord::Folder {
+                parent_cnid: HFS_ROOT_FOLDER_CNID,
+                name: "docs".to_string(),
+                cnid: 20,
+            },
+            CatalogRecord::File {
+                parent_cnid: 20, // child of "docs"
+                name: "readme.txt".to_string(),
+                cnid: 21,
+                file_length: 100,
+                file_location: None,
+            },
+        ];
+        let root = build_tree(&records, 4096);
+        assert_eq!(root.children.len(), 1);
+        let docs = &root.children[0];
+        assert_eq!(docs.name, "docs");
+        assert!(docs.is_directory);
+        assert_eq!(docs.children.len(), 1);
+        assert_eq!(docs.children[0].name, "readme.txt");
+    }
+
+    #[test]
+    fn build_tree_thread_record_ignored() {
+        let records = vec![
+            CatalogRecord::Thread {
+                cnid_key: 5,
+                record_type: 3,
+            },
+            CatalogRecord::File {
+                parent_cnid: HFS_ROOT_FOLDER_CNID,
+                name: "f.bin".to_string(),
+                cnid: 5,
+                file_length: 0,
+                file_location: None,
+            },
+        ];
+        let root = build_tree(&records, 4096);
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "f.bin");
+    }
+
+    #[test]
+    fn build_tree_file_without_location() {
+        let records = vec![CatalogRecord::File {
+            parent_cnid: HFS_ROOT_FOLDER_CNID,
+            name: "sparse.dat".to_string(),
+            cnid: 30,
+            file_length: 200,
+            file_location: None,
+        }];
+        let root = build_tree(&records, 512);
+        let node = &root.children[0];
+        assert_eq!(node.name, "sparse.dat");
+        assert!(node.file_location.is_none());
+    }
+
+    // ── parse_leaf_node_records ───────────────────────────────────────────────
+
+    /// Build a minimal leaf node buffer with one catalog record at a given
+    /// offset, plus the offset table at the end.
+    fn make_leaf_node(key_data: &[u8], record_data: &[u8]) -> Vec<u8> {
+        // Node size = 512 bytes (one sector).
+        let node_size = 512usize;
+        let mut node = vec![0u8; node_size];
+
+        // Record starts at offset 14 (after the 14-byte node descriptor).
+        let rec_start: u16 = 14;
+        let rec_end = rec_start as usize + key_data.len() + record_data.len();
+
+        node[rec_start as usize..rec_start as usize + key_data.len()].copy_from_slice(key_data);
+        node[rec_start as usize + key_data.len()..rec_end].copy_from_slice(record_data);
+
+        // Offset table: [node_size - 2] = rec_start (one record → one entry)
+        let ot_idx = node_size - 2; // offset for record 0
+        node[ot_idx..ot_idx + 2].copy_from_slice(&rec_start.to_be_bytes());
+
+        node
+    }
+
+    /// Build a catalog key with the given parent_cnid and name (UTF-16 BE).
+    fn make_catalog_key(parent_cnid: u32, name: &str) -> Vec<u8> {
+        let name_utf16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        let name_len = name.encode_utf16().count() as u16;
+        let key_length = (6 + name_utf16.len()) as u16; // parent(4) + name.length(2) + name
+        let mut key = Vec::new();
+        key.extend_from_slice(&key_length.to_be_bytes()); // key_length (2 bytes)
+        key.extend_from_slice(&parent_cnid.to_be_bytes()); // parent_cnid (4 bytes)
+        key.extend_from_slice(&name_len.to_be_bytes()); // name.length (2 bytes)
+        key.extend_from_slice(&name_utf16); // name bytes
+                                            // Pad key to even length if needed (data_off = (2 + key_length + 1) & !1)
+        if key.len() % 2 != 0 {
+            key.push(0);
+        }
+        key
+    }
+
+    #[test]
+    fn parse_leaf_node_folder_record() {
+        let key = make_catalog_key(HFS_ROOT_FOLDER_CNID, "subdir");
+        // Folder record: type=0x0001, valence(ignored), cnid at offset 8
+        let cnid: u32 = 100;
+        let mut rec_data = vec![0u8; 248];
+        rec_data[0..2].copy_from_slice(&RECORD_TYPE_FOLDER.to_be_bytes());
+        rec_data[8..12].copy_from_slice(&cnid.to_be_bytes());
+
+        let node = make_leaf_node(&key, &rec_data);
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+
+        assert_eq!(out.len(), 1);
+        if let CatalogRecord::Folder {
+            parent_cnid,
+            name,
+            cnid: c,
+        } = &out[0]
+        {
+            assert_eq!(*parent_cnid, HFS_ROOT_FOLDER_CNID);
+            assert_eq!(name, "subdir");
+            assert_eq!(*c, 100);
+        } else {
+            panic!("expected Folder record");
+        }
+    }
+
+    #[test]
+    fn parse_leaf_node_file_record() {
+        let key = make_catalog_key(HFS_ROOT_FOLDER_CNID, "file.txt");
+        let mut rec_data = vec![0u8; 248];
+        rec_data[0..2].copy_from_slice(&RECORD_TYPE_FILE.to_be_bytes());
+        // cnid at offset 8
+        rec_data[8..12].copy_from_slice(&55u32.to_be_bytes());
+        // data_fork at offset 88: logical_size=1024, total_blocks=1, extent[0]=(10,1)
+        let fork_off = 88;
+        rec_data[fork_off..fork_off + 8].copy_from_slice(&1024u64.to_be_bytes()); // logical_size
+        rec_data[fork_off + 12..fork_off + 16].copy_from_slice(&1u32.to_be_bytes()); // total_blocks
+        rec_data[fork_off + 16..fork_off + 20].copy_from_slice(&10u32.to_be_bytes()); // start_block
+        rec_data[fork_off + 20..fork_off + 24].copy_from_slice(&1u32.to_be_bytes()); // block_count
+
+        let node = make_leaf_node(&key, &rec_data);
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+
+        assert_eq!(out.len(), 1);
+        if let CatalogRecord::File {
+            name,
+            file_length,
+            file_location,
+            ..
+        } = &out[0]
+        {
+            assert_eq!(name, "file.txt");
+            assert_eq!(*file_length, 1024);
+            // single extent → location = start_block * block_size = 10 * 4096
+            assert_eq!(*file_location, Some(10 * 4096));
+        } else {
+            panic!("expected File record");
+        }
+    }
+
+    #[test]
+    fn parse_leaf_node_thread_record() {
+        let key = make_catalog_key(HFS_ROOT_FOLDER_CNID, "");
+        let mut rec_data = vec![0u8; 10];
+        rec_data[0..2].copy_from_slice(&RECORD_TYPE_FOLDER_THREAD.to_be_bytes());
+
+        let node = make_leaf_node(&key, &rec_data);
+        let mut out = Vec::new();
+        parse_leaf_node_records(&node, 1, 4096, &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], CatalogRecord::Thread { .. }));
     }
 }

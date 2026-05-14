@@ -111,20 +111,54 @@ pub fn parse_udf_verbose<R: Read + Seek>(file: &mut R, verbose: bool) -> Result<
         return Err("Not a valid UDF filesystem (no VRS markers found)".into());
     }
 
-    // Try to find the Anchor Volume Descriptor Pointer (AVDP) at sector 256
+    // Try to find the Anchor Volume Descriptor Pointer (AVDP).
+    // ECMA-167 §8.4.2 mandates sector 256, and also sector N and N-256 for
+    // multi-session discs.  Compact images (e.g. hdiutil on macOS) sometimes
+    // place the AVDP earlier, so we scan a short candidate list.
     if verbose {
-        eprintln!("Looking for Anchor Volume Descriptor Pointer at sector 256...");
+        eprintln!("Looking for Anchor Volume Descriptor Pointer...");
     }
-    file.seek(SeekFrom::Start(256 * SECTOR_SIZE))?;
-    let mut avdp_buffer = [0u8; 512];
-    file.read_exact(&mut avdp_buffer)?;
-
-    let tag_id = u16::from_le_bytes([avdp_buffer[0], avdp_buffer[1]]);
-    if tag_id != 2 {
-        if verbose {
-            eprintln!("  AVDP not found at sector 256 (tag id: {})", tag_id);
+    let image_size = file.seek(SeekFrom::End(0)).unwrap_or(0);
+    let last_sector = image_size / SECTOR_SIZE;
+    // Candidates: standard position 256, then last, last-256, and a compact
+    // fallback scan for images smaller than 256 sectors.
+    let mut candidates: Vec<u64> = vec![256];
+    if last_sector > 0 && last_sector != 256 {
+        candidates.push(last_sector);
+    }
+    if last_sector > 256 {
+        candidates.push(last_sector - 256);
+    }
+    // Compact fallback: scan every sector from 32..min(256, last_sector).
+    for s in 32..256.min(last_sector) {
+        if !candidates.contains(&s) {
+            candidates.push(s);
         }
-        return Err("UDF detected but AVDP not found at sector 256.".into());
+    }
+
+    let mut avdp_buffer = [0u8; 512];
+    let mut found_avdp = false;
+    for candidate in &candidates {
+        if file.seek(SeekFrom::Start(candidate * SECTOR_SIZE)).is_err() {
+            continue;
+        }
+        if file.read_exact(&mut avdp_buffer).is_err() {
+            continue;
+        }
+        let tag_id = u16::from_le_bytes([avdp_buffer[0], avdp_buffer[1]]);
+        if tag_id == 2 {
+            if verbose {
+                eprintln!("  Found AVDP at sector {}", candidate);
+            }
+            found_avdp = true;
+            break;
+        }
+    }
+    if !found_avdp {
+        if verbose {
+            eprintln!("  AVDP not found in any candidate sector");
+        }
+        return Err("UDF detected but no Anchor Volume Descriptor Pointer found.".into());
     }
 
     let main_vds_extent = read_extent_ad(&avdp_buffer[16..24]);
@@ -725,5 +759,357 @@ fn parse_udf_name(data: &[u8]) -> String {
         String::from_utf16_lossy(&utf16_data)
     } else {
         String::from_utf8_lossy(data).to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    const S: usize = 2048; // sector size
+
+    /// Write `val` as a little-endian u16 into `buf` at `offset`.
+    fn w16(buf: &mut [u8], offset: usize, val: u16) {
+        buf[offset..offset + 2].copy_from_slice(&val.to_le_bytes());
+    }
+    /// Write `val` as a little-endian u32 into `buf` at `offset`.
+    fn w32(buf: &mut [u8], offset: usize, val: u32) {
+        buf[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
+    }
+
+    /// Build a minimal synthetic UDF image (270 sectors) that parse_udf can
+    /// successfully read.  The root directory contains one file "hello.txt"
+    /// with inline content.
+    fn make_udf_image() -> Vec<u8> {
+        let mut img = vec![0u8; S * 270];
+
+        // VRS (sectors 16-18)
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+
+        // AVDP at sector 256 (tag_id=2)
+        // Main VDS: location=257, length=3*S (PD + LVD + TD)
+        let avdp = 256 * S;
+        w16(&mut img, avdp, 2);
+        w32(&mut img, avdp + 16, (3 * S) as u32); // Main VDS length
+        w32(&mut img, avdp + 20, 257); // Main VDS location
+
+        // PD at sector 257 (tag_id=5): partition 0 starts at sector 260
+        let pd = 257 * S;
+        w16(&mut img, pd, 5);
+        w16(&mut img, pd + 22, 0); // partition_number = 0
+        w32(&mut img, pd + 188, 260); // start sector = 260
+
+        // LVD at sector 258 (tag_id=6): FSD at location=0 in partition=0
+        let lvd = 258 * S;
+        w16(&mut img, lvd, 6);
+        // FSD LongAD (bytes 248-263): {length, location, partition}
+        w32(&mut img, lvd + 248, S as u32); // length = one sector
+        w32(&mut img, lvd + 252, 0); // location = 0 (in partition 0)
+        w16(&mut img, lvd + 256, 0); // partition = 0
+                                     // MapTableLength + NumPartitionMaps stay 0 → no metadata partition
+
+        // TD at sector 259 (tag_id=8)
+        w16(&mut img, 259 * S, 8);
+
+        // FSD at sector 260 (partition 0, location 0 → absolute sector 260)
+        let fsd = 260 * S;
+        w16(&mut img, fsd, 256); // tag_id = 256
+                                 // Root ICB LongAD at bytes 400-415: {length, location=1, partition=0}
+        w32(&mut img, fsd + 400, S as u32); // length
+        w32(&mut img, fsd + 404, 1); // location = 1 (→ sector 261)
+        w16(&mut img, fsd + 408, 0); // partition = 0
+
+        // Root directory File Entry at sector 261 (tag_id=261)
+        // Uses inline data (ICB flags bits 0-2 = 3).
+        let rfe = 261 * S;
+        w16(&mut img, rfe, 261); // tag_id = 261
+        w16(&mut img, rfe + 18, 3); // ICB flags: ad_type = 3 (inline)
+                                    // EA length (offset 168) = 0
+                                    // Build FID data inline: parent FID + one file FID
+        let fid_data = make_fid_data();
+        w32(&mut img, rfe + 172, fid_data.len() as u32); // AD length = FID data size
+        img[rfe + 176..rfe + 176 + fid_data.len()].copy_from_slice(&fid_data);
+
+        // "hello.txt" File Entry at sector 262 (partition 0, location 2)
+        // Inline data: the file content itself.
+        let content = b"Hello UDF!";
+        let hfe = 262 * S;
+        w16(&mut img, hfe, 261); // tag_id = 261
+        w16(&mut img, hfe + 18, 3); // ICB flags: inline
+        w32(&mut img, hfe + 172, content.len() as u32); // AD length
+        img[hfe + 176..hfe + 176 + content.len()].copy_from_slice(content);
+
+        img
+    }
+
+    /// Build FID bytes for the root directory: a parent FID plus a "hello.txt" file FID.
+    fn make_fid_data() -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // Parent FID (file_characteristics = 0x08 = PARENT, no name)
+        // Structure: tag(16) + file_char(1) + len_fi(1) + ICB(16) + len_iu(2) = 36 bytes
+        // But parser reads: offset+18=file_char, offset+19=len_fi, offset+20..36=ICB, 36..38=len_iu
+        // Full FID minimum = 38 bytes; padded to 4-byte boundary = 40.
+        let mut parent = vec![0u8; 40];
+        w16(&mut parent, 0, 257); // tag_id = 257 (FID)
+        parent[18] = 0x08; // PARENT flag
+        parent[19] = 0; // no file identifier
+                        // ICB at offset 20: zeros (ignored for parent)
+                        // len_iu at offset 36-37: 0
+        data.extend_from_slice(&parent);
+
+        // "hello.txt" file FID (file_characteristics=0, has a name)
+        // Name encoded as OSTA CS0 (compression_id=8 followed by ASCII bytes)
+        let name_raw: Vec<u8> = {
+            let mut n = vec![8u8]; // CS0: 8-bit chars
+            n.extend_from_slice(b"hello.txt");
+            n
+        };
+        // FID structure: 38 bytes header + len_iu bytes + name bytes, padded to 4 bytes
+        let len_fi = name_raw.len() as u8;
+        let total_unpadded = 38 + len_fi as usize;
+        let padded = (total_unpadded + 3) & !3;
+        let mut file_fid = vec![0u8; padded];
+        w16(&mut file_fid, 0, 257); // tag_id = 257 (FID)
+        file_fid[18] = 0x00; // regular file
+        file_fid[19] = len_fi; // length_of_fi
+                               // ICB at offset 20: location=2 (→ sector 262 in partition 0), partition=0
+        w32(&mut file_fid, 20, 512); // length (arbitrary, for the ICB)
+        w32(&mut file_fid, 24, 2); // location = 2
+        w16(&mut file_fid, 28, 0); // partition = 0
+                                   // len_iu at offset 36-37: 0
+                                   // name at offset 38:
+        file_fid[38..38 + name_raw.len()].copy_from_slice(&name_raw);
+        data.extend_from_slice(&file_fid);
+
+        data
+    }
+
+    // ── read_extent_ad / read_long_ad ─────────────────────────────────────────
+
+    #[test]
+    fn read_extent_ad_little_endian() {
+        let buf = [0x00, 0x10, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00];
+        let ext = read_extent_ad(&buf);
+        assert_eq!(ext.length, 0x1000);
+        assert_eq!(ext.location, 5);
+    }
+
+    #[test]
+    fn read_long_ad_parses_partition() {
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&512u32.to_le_bytes()); // length
+        buf[4..8].copy_from_slice(&42u32.to_le_bytes()); // location
+        buf[8..10].copy_from_slice(&7u16.to_le_bytes()); // partition
+        let ad = read_long_ad(&buf);
+        assert_eq!(ad.length, 512);
+        assert_eq!(ad.location, 42);
+        assert_eq!(ad.partition, 7);
+    }
+
+    // ── get_file_allocation ───────────────────────────────────────────────────
+
+    fn make_fe_buf(tag_id: u16, ad_type: u16, ad_bytes: &[u8]) -> Vec<u8> {
+        // Use File Entry (tag_id=261) offsets: EA@168, AD@172, data@176
+        let mut buf = vec![0u8; 2048];
+        w16(&mut buf, 0, tag_id);
+        w16(&mut buf, 18, ad_type); // ICB flags[0..2] = ad_type
+        w32(&mut buf, 168, 0); // EA length = 0
+        w32(&mut buf, 172, ad_bytes.len() as u32); // AD length
+        buf[176..176 + ad_bytes.len()].copy_from_slice(ad_bytes);
+        buf
+    }
+
+    #[test]
+    fn file_alloc_short_ad() {
+        // One 8-byte short AD: length=1024, location=5
+        let mut ad = vec![0u8; 8];
+        w32(&mut ad, 0, 1024); // raw_length = 1024 (type=0)
+        w32(&mut ad, 4, 5); // location = 5
+        let buf = make_fe_buf(261, 0, &ad);
+        let alloc = get_file_allocation(&buf).unwrap();
+        assert_eq!(alloc.total_length, 1024);
+        assert_eq!(alloc.extents.len(), 1);
+        assert_eq!(alloc.extents[0].location, 5);
+    }
+
+    #[test]
+    fn file_alloc_short_ad_sparse_skipped() {
+        // Type 1 (allocated but not recorded — sparse): only AD is sparse,
+        // leaving extents empty → get_file_allocation returns Err.
+        let mut ad = vec![0u8; 8];
+        let raw = (1u32 << 30) | 512; // extent_type=1, length=512
+        w32(&mut ad, 0, raw);
+        w32(&mut ad, 4, 99);
+        let buf = make_fe_buf(261, 0, &ad);
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    #[test]
+    fn file_alloc_long_ad() {
+        // One 16-byte long AD
+        let mut ad = vec![0u8; 16];
+        w32(&mut ad, 0, 4096); // length
+        w32(&mut ad, 4, 10); // location
+        w16(&mut ad, 8, 0); // partition
+        let buf = make_fe_buf(261, 1, &ad);
+        let alloc = get_file_allocation(&buf).unwrap();
+        assert_eq!(alloc.total_length, 4096);
+        assert_eq!(alloc.extents.len(), 1);
+    }
+
+    #[test]
+    fn file_alloc_inline_data() {
+        let content = b"hello inline";
+        let buf = make_fe_buf(261, 3, content);
+        let alloc = get_file_allocation(&buf).unwrap();
+        assert_eq!(alloc.total_length, content.len() as u64);
+        assert!(alloc.inline_data.is_some());
+        assert_eq!(alloc.inline_data.unwrap(), content);
+    }
+
+    #[test]
+    fn file_alloc_extended_file_entry() {
+        // Extended File Entry (tag_id=266) uses EA@208, AD@212, data@216
+        let content = b"efe data";
+        let mut buf = vec![0u8; 2048];
+        w16(&mut buf, 0, 266); // EFE tag
+        w16(&mut buf, 18, 3); // inline ad_type
+        w32(&mut buf, 208, 0); // EA length = 0
+        w32(&mut buf, 212, content.len() as u32); // AD length
+        buf[216..216 + content.len()].copy_from_slice(content);
+        let alloc = get_file_allocation(&buf).unwrap();
+        assert_eq!(alloc.total_length, content.len() as u64);
+    }
+
+    #[test]
+    fn file_alloc_rejects_unknown_tag() {
+        let buf = make_fe_buf(999, 0, &[]);
+        assert!(get_file_allocation(&buf).is_err());
+    }
+
+    #[test]
+    fn file_alloc_fallback_ad_type() {
+        // ad_type=2 triggers the fallback branch
+        let mut ad = [0u8; 8];
+        w32(&mut ad, 0, 512); // length=512
+        w32(&mut ad, 4, 7); // location=7
+        let buf = make_fe_buf(261, 2, &ad);
+        let alloc = get_file_allocation(&buf).unwrap();
+        assert_eq!(alloc.total_length, 512);
+    }
+
+    // ── parse_udf_name ────────────────────────────────────────────────────────
+
+    #[test]
+    fn udf_name_cs0_8bit() {
+        let data = [8u8, b'h', b'i'];
+        assert_eq!(parse_udf_name(&data), "hi");
+    }
+
+    #[test]
+    fn udf_name_cs0_16bit() {
+        // compression_id=16, UTF-16 big-endian 'A' (0x0041)
+        let data = [16u8, 0x00, 0x41];
+        assert_eq!(parse_udf_name(&data), "A");
+    }
+
+    #[test]
+    fn udf_name_fallback_raw() {
+        // Unknown compression ID → raw UTF-8 lossy
+        let data = [42u8, b'x', b'y'];
+        let name = parse_udf_name(&data);
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn udf_name_empty() {
+        assert_eq!(parse_udf_name(&[]), "");
+    }
+
+    // ── parse_udf error paths ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_udf_rejects_non_udf() {
+        let mut c = Cursor::new(vec![0u8; 4096]);
+        assert!(parse_udf(&mut c).is_err());
+    }
+
+    #[test]
+    fn parse_udf_no_avdp_after_vrs() {
+        // Image has VRS markers but no AVDP anywhere
+        let mut img = vec![0u8; S * 270];
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR03");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+        // No AVDP written → all sector tag_ids remain 0
+        let mut c = Cursor::new(img);
+        let err = parse_udf(&mut c).unwrap_err();
+        assert!(err.to_string().contains("Anchor") || err.to_string().contains("AVDP"));
+    }
+
+    #[test]
+    fn parse_udf_no_lvd_returns_err() {
+        // VRS + AVDP pointing to a VDS with only a PD, no LVD
+        let mut img = vec![0u8; S * 270];
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"BEA01");
+        img[17 * S + 1..17 * S + 6].copy_from_slice(b"NSR02");
+        img[18 * S + 1..18 * S + 6].copy_from_slice(b"TEA01");
+        // AVDP at sector 256
+        let avdp = 256 * S;
+        w16(&mut img, avdp, 2);
+        w32(&mut img, avdp + 16, (2 * S) as u32);
+        w32(&mut img, avdp + 20, 257);
+        // PD only (no LVD)
+        w16(&mut img, 257 * S, 5);
+        w16(&mut img, 257 * S + 22, 0);
+        w32(&mut img, 257 * S + 188, 260);
+        // TD
+        w16(&mut img, 258 * S, 8);
+        let mut c = Cursor::new(img);
+        assert!(parse_udf(&mut c).is_err());
+    }
+
+    // ── parse_udf verbose ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_udf_verbose_non_udf() {
+        let mut c = Cursor::new(vec![0u8; 4096]);
+        // verbose=true exercises the eprintln! path
+        assert!(parse_udf_verbose(&mut c, true).is_err());
+    }
+
+    // ── Full happy-path parse ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_udf_synthetic_image_root_found() {
+        let img = make_udf_image();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("parse should succeed");
+        assert_eq!(root.name, "/");
+        assert!(root.is_directory);
+    }
+
+    #[test]
+    fn parse_udf_synthetic_finds_hello_txt() {
+        let img = make_udf_image();
+        let mut c = Cursor::new(img);
+        let root = parse_udf(&mut c).expect("parse should succeed");
+        let node = root.find_node("/hello.txt");
+        assert!(node.is_some(), "hello.txt should be in root");
+    }
+
+    #[test]
+    fn parse_udf_verbose_synthetic_image() {
+        let img = make_udf_image();
+        let mut c = Cursor::new(img);
+        // verbose=true exercises all eprintln! branches in the happy path
+        let root = parse_udf_verbose(&mut c, true).expect("parse should succeed");
+        assert_eq!(root.name, "/");
     }
 }

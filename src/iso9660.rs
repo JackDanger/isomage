@@ -382,3 +382,338 @@ fn parse_directory<R: Read + Seek>(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    const S: usize = 2048; // sector size
+
+    /// Build a minimal ISO 9660 Primary-only image (no Joliet).
+    /// Puts one file "HELLO.TXT" in the root directory.
+    fn make_iso_primary_only() -> Vec<u8> {
+        let mut img = vec![0u8; S * 20];
+
+        // PVD at sector 16 (type=1, magic=CD001)
+        let pvd = 16 * S;
+        img[pvd] = 1; // VD type: Primary
+        img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        img[pvd + 6] = 1; // version
+
+        // Root directory record at PVD offset 156 (33 bytes minimum)
+        // Points root dir to sector 18, size = 2048
+        let root_off = pvd + 156;
+        img[root_off] = 34; // record length
+        img[root_off + 2..root_off + 6].copy_from_slice(&18u32.to_le_bytes()); // extent LE
+        img[root_off + 6..root_off + 10].copy_from_slice(&18u32.to_be_bytes()); // extent BE
+        img[root_off + 10..root_off + 14].copy_from_slice(&(S as u32).to_le_bytes()); // size LE
+        img[root_off + 14..root_off + 18].copy_from_slice(&(S as u32).to_be_bytes()); // size BE
+        img[root_off + 25] = 0x02; // file flags: directory
+        img[root_off + 32] = 1; // filename length = 1
+        img[root_off + 33] = 0; // filename = 0x00 → "." (current dir)
+
+        // Volume Descriptor Set Terminator at sector 17
+        let vdst = 17 * S;
+        img[vdst] = 255; // VD type: terminator
+        img[vdst + 1..vdst + 6].copy_from_slice(b"CD001");
+
+        // Root directory data at sector 18
+        let dir = 18 * S;
+        // Entry 0: "." (self)
+        img[dir] = 34;
+        img[dir + 2..dir + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[dir + 10..dir + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[dir + 25] = 0x02; // directory
+        img[dir + 32] = 1;
+        img[dir + 33] = 0; // 0x00 = "."
+
+        // Entry 1: ".." (parent)
+        let e1 = dir + 34;
+        img[e1] = 34;
+        img[e1 + 2..e1 + 6].copy_from_slice(&18u32.to_le_bytes());
+        img[e1 + 10..e1 + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[e1 + 25] = 0x02;
+        img[e1 + 32] = 1;
+        img[e1 + 33] = 1; // 0x01 = ".."
+
+        // Entry 2: "HELLO.TXT;1" regular file at sector 19, size 11
+        let e2 = e1 + 34;
+        let name = b"HELLO.TXT;1";
+        img[e2] = (33 + name.len()) as u8; // record length
+        img[e2 + 2..e2 + 6].copy_from_slice(&19u32.to_le_bytes()); // extent
+        img[e2 + 10..e2 + 14].copy_from_slice(&11u32.to_le_bytes()); // size
+        img[e2 + 25] = 0x00; // file
+        img[e2 + 32] = name.len() as u8;
+        img[e2 + 33..e2 + 33 + name.len()].copy_from_slice(name);
+
+        // File data at sector 19
+        img[19 * S..19 * S + 11].copy_from_slice(b"Hello World");
+
+        img
+    }
+
+    /// Minimal ISO with a Joliet SVD in addition to PVD.
+    fn make_iso_joliet() -> Vec<u8> {
+        let mut img = make_iso_primary_only();
+        img.resize(S * 22, 0);
+
+        // Joliet SVD at sector 17 (before VDST which we push to 18)
+        let svd = 17 * S;
+        img[svd] = 2; // VD type: Supplementary
+        img[svd + 1..svd + 6].copy_from_slice(b"CD001");
+        img[svd + 6] = 1;
+        // Joliet escape: %/@ at bytes 88-90
+        img[svd + 88..svd + 91].copy_from_slice(b"%/@");
+
+        // Root record in Joliet SVD (pointing to sector 20)
+        let jroot = svd + 156;
+        img[jroot] = 34;
+        img[jroot + 2..jroot + 6].copy_from_slice(&20u32.to_le_bytes());
+        img[jroot + 10..jroot + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[jroot + 25] = 0x02; // directory
+        img[jroot + 32] = 1;
+        img[jroot + 33] = 0; // "."
+
+        // Move VDST to sector 18
+        let vdst = 18 * S;
+        img[vdst] = 255;
+        img[vdst + 1..vdst + 6].copy_from_slice(b"CD001");
+
+        // Joliet directory at sector 20
+        let jdir = 20 * S;
+        // "." entry
+        img[jdir] = 34;
+        img[jdir + 2..jdir + 6].copy_from_slice(&20u32.to_le_bytes());
+        img[jdir + 10..jdir + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[jdir + 25] = 0x02;
+        img[jdir + 32] = 1;
+        img[jdir + 33] = 0;
+        // ".." entry
+        let je1 = jdir + 34;
+        img[je1] = 34;
+        img[je1 + 2..je1 + 6].copy_from_slice(&20u32.to_le_bytes());
+        img[je1 + 10..je1 + 14].copy_from_slice(&(S as u32).to_le_bytes());
+        img[je1 + 25] = 0x02;
+        img[je1 + 32] = 1;
+        img[je1 + 33] = 1;
+        // "hi.txt" in Joliet (UCS-2 BE): h=0x0068, i=0x0069, .=0x002E, t=0x0074, x=0x0078, t=0x0074
+        let joliet_name: Vec<u8> = "hi.txt"
+            .encode_utf16()
+            .flat_map(|c| c.to_be_bytes())
+            .collect();
+        let je2 = je1 + 34;
+        img[je2] = (33 + joliet_name.len()) as u8;
+        img[je2 + 2..je2 + 6].copy_from_slice(&19u32.to_le_bytes()); // same file data
+        img[je2 + 10..je2 + 14].copy_from_slice(&11u32.to_le_bytes());
+        img[je2 + 25] = 0x00; // file
+        img[je2 + 32] = joliet_name.len() as u8;
+        img[je2 + 33..je2 + 33 + joliet_name.len()].copy_from_slice(&joliet_name);
+
+        img
+    }
+
+    // ── parse_directory_record ────────────────────────────────────────────────
+
+    #[test]
+    fn directory_record_too_short_errors() {
+        let buf = [0u8; 10]; // less than 34 bytes
+        assert!(parse_directory_record(&buf, VolumeDescriptorType::Primary).is_err());
+    }
+
+    #[test]
+    fn directory_record_zero_length_errors() {
+        let mut buf = [0u8; 40];
+        buf[0] = 0; // length = 0 → error
+        assert!(parse_directory_record(&buf, VolumeDescriptorType::Primary).is_err());
+    }
+
+    #[test]
+    fn directory_record_dot_entry() {
+        let mut buf = [0u8; 40];
+        buf[0] = 34;
+        buf[32] = 1; // filename_length = 1
+        buf[33] = 0; // filename = 0x00 → "."
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Primary).unwrap();
+        assert_eq!(rec.filename, ".");
+    }
+
+    #[test]
+    fn directory_record_dotdot_entry() {
+        let mut buf = [0u8; 40];
+        buf[0] = 34;
+        buf[32] = 1;
+        buf[33] = 1; // 0x01 → ".."
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Primary).unwrap();
+        assert_eq!(rec.filename, "..");
+    }
+
+    #[test]
+    fn directory_record_primary_strips_version() {
+        let mut buf = [0u8; 50];
+        let name = b"FILE.TXT;1";
+        buf[0] = (33 + name.len()) as u8;
+        buf[32] = name.len() as u8;
+        buf[33..33 + name.len()].copy_from_slice(name);
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Primary).unwrap();
+        assert_eq!(rec.filename, "FILE.TXT");
+    }
+
+    #[test]
+    fn directory_record_joliet_unicode() {
+        // Encode "hi" as UCS-2 BE
+        let name: Vec<u8> = "hi".encode_utf16().flat_map(|c| c.to_be_bytes()).collect();
+        let mut buf = vec![0u8; 33 + name.len() + 2];
+        buf[0] = (33 + name.len()) as u8;
+        buf[32] = name.len() as u8;
+        buf[33..33 + name.len()].copy_from_slice(&name);
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Joliet).unwrap();
+        assert_eq!(rec.filename, "hi");
+    }
+
+    #[test]
+    fn directory_record_is_directory_flag() {
+        let mut buf = [0u8; 40];
+        buf[0] = 34;
+        buf[25] = 0x02; // directory flag
+        buf[32] = 1;
+        buf[33] = 0;
+        let rec = parse_directory_record(&buf, VolumeDescriptorType::Primary).unwrap();
+        assert!(rec.is_directory);
+    }
+
+    // ── parse_iso9660 error paths ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_iso9660_rejects_non_iso() {
+        let mut c = Cursor::new(vec![0u8; S * 20]);
+        assert!(parse_iso9660(&mut c).is_err());
+    }
+
+    #[test]
+    fn parse_iso9660_verbose_rejects_non_iso() {
+        let mut c = Cursor::new(vec![0u8; S * 20]);
+        assert!(parse_iso9660_verbose(&mut c, true).is_err());
+    }
+
+    #[test]
+    fn parse_iso9660_no_vd_returns_err() {
+        // Has CD001 signature but no PVD or Joliet → should error
+        let mut img = vec![0u8; S * 20];
+        img[16 * S] = 255; // VD type: terminator immediately
+        img[16 * S + 1..16 * S + 6].copy_from_slice(b"CD001");
+        let mut c = Cursor::new(img);
+        assert!(parse_iso9660(&mut c).is_err());
+    }
+
+    // ── parse_iso9660 happy paths ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_iso9660_primary_root_has_file() {
+        let img = make_iso_primary_only();
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).expect("should parse");
+        assert_eq!(root.name, "/");
+        assert!(root.is_directory);
+        // "HELLO.TXT;1" → stripped to "HELLO.TXT"
+        let node = root.find_node("/HELLO.TXT");
+        assert!(node.is_some(), "HELLO.TXT not found in root");
+    }
+
+    #[test]
+    fn parse_iso9660_primary_file_size() {
+        let img = make_iso_primary_only();
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).unwrap();
+        let node = root.find_node("/HELLO.TXT").unwrap();
+        assert_eq!(node.size, 11);
+    }
+
+    #[test]
+    fn parse_iso9660_joliet_prefers_joliet() {
+        let img = make_iso_joliet();
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660(&mut c).expect("should parse");
+        // Joliet path should have "hi.txt" (not "HELLO.TXT")
+        assert!(
+            root.find_node("/hi.txt").is_some(),
+            "Joliet entry not found"
+        );
+    }
+
+    #[test]
+    fn parse_iso9660_verbose_primary_works() {
+        let img = make_iso_primary_only();
+        let mut c = Cursor::new(img);
+        let root = parse_iso9660_verbose(&mut c, true).unwrap();
+        assert_eq!(root.name, "/");
+    }
+
+    // ── extract_rock_ridge_name ───────────────────────────────────────────────
+
+    #[test]
+    fn rock_ridge_nm_entry_extracted() {
+        // Build a directory record data buffer with an NM system-use entry
+        // record_length=50, filename_length=1 (filename=0x00, ".")
+        // su_start = 33 + 1 + ((1+1)%2) = 33 + 1 + 0 = 34
+        // NM entry at offset 34: sig="NM", entry_len=12, version=1, flags=0, name="longname"
+        let mut data = vec![0u8; 60];
+        data[0] = 60; // record_length
+        data[32] = 1; // filename_length
+        data[33] = 0; // filename = "."
+        let su_off = 34;
+        data[su_off] = b'N';
+        data[su_off + 1] = b'M';
+        data[su_off + 2] = 13; // entry_len = 5+8 = 13
+        data[su_off + 3] = 1; // version
+        data[su_off + 4] = 0; // flags = 0 (normal name)
+        data[su_off + 5..su_off + 13].copy_from_slice(b"longname");
+
+        let result = extract_rock_ridge_name(&data, 60, 1);
+        assert_eq!(result, Some("longname".to_string()));
+    }
+
+    #[test]
+    fn rock_ridge_nm_parent_flag_skipped() {
+        // flags=0x04 → PARENT flag → name should be skipped
+        let mut data = vec![0u8; 60];
+        data[0] = 60;
+        data[32] = 1;
+        data[33] = 0;
+        let su_off = 34;
+        data[su_off] = b'N';
+        data[su_off + 1] = b'M';
+        data[su_off + 2] = 13;
+        data[su_off + 3] = 1;
+        data[su_off + 4] = 0x04; // PARENT flag
+        data[su_off + 5..su_off + 13].copy_from_slice(b"ignored!");
+        let result = extract_rock_ridge_name(&data, 60, 1);
+        assert_eq!(result, None);
+    }
+
+    // ── real images ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_linux_iso_succeeds() {
+        let path = std::path::Path::new("test_data/test_linux.iso");
+        if !path.exists() {
+            return;
+        }
+        let mut f = std::fs::File::open(path).unwrap();
+        let root = parse_iso9660(&mut f).expect("should parse test_linux.iso");
+        assert_eq!(root.name, "/");
+        assert!(!root.children.is_empty(), "root should have children");
+    }
+
+    #[test]
+    fn parse_macos_iso_joliet() {
+        let path = std::path::Path::new("test_data/test_macos.iso");
+        if !path.exists() {
+            return;
+        }
+        let mut f = std::fs::File::open(path).unwrap();
+        let root = parse_iso9660(&mut f).expect("should parse test_macos.iso");
+        assert_eq!(root.name, "/");
+        assert!(!root.children.is_empty());
+    }
+}
