@@ -1,5 +1,0 @@
-# isomage tree snapshot v1
-# reference: sfdisk from util-linux 2.39.3
-# ---
-d/
-  -partition-0-type-83              location=1048576    size=104857600
