@@ -144,7 +144,7 @@ jobs:
             sevenzip || true
 
       - name: Build round-trip tests
-        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar --tests
+        run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar,write --tests
       - name: Run round-trip tests (Ubuntu strict)
         if: runner.os == 'Linux'
         env:
@@ -155,7 +155,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar,write --test "$bin"
           done
 
       - name: Run round-trip tests (macOS, non-strict)
@@ -167,7 +167,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs tests/harness_self_test.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar,write --test "$bin"
           done
 
   # ---------------------------------------------------------------------
@@ -224,7 +224,7 @@ jobs:
         run: |
           for bin in $(ls tests/*_round_trip.rs 2>/dev/null | xargs -n1 basename | sed 's/\.rs$//'); do
             echo "=== $bin ==="
-            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar --test "$bin"
+            cargo test --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar,write --test "$bin"
           done
 
   # ---------------------------------------------------------------------

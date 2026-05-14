@@ -1007,4 +1007,128 @@ mod tests {
         assert_eq!(root.children.len(), 1);
         assert_eq!(root.children[0].name, "a.txt");
     }
+
+    // ── find_eocd edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn find_eocd_rejects_too_short() {
+        // File shorter than EOCD_MIN_SIZE (22 bytes).
+        let mut c = Cursor::new(b"PK\x05\x06");
+        assert!(matches!(detect(&mut c), Err(Error::NotZip)));
+    }
+
+    #[test]
+    fn entry_with_slash_only_name_skipped() {
+        // CD entry with name "/" — raw.is_empty() after trim → skipped.
+        let dir_name = b"/";
+        let mut z = Vec::new();
+        // LFH
+        z.extend_from_slice(&LFH_SIG.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&(dir_name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(dir_name);
+        let cd_offset = z.len() as u32;
+        z.extend_from_slice(&CDR_SIG.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&20u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&(dir_name.len() as u16).to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(&0u32.to_le_bytes());
+        z.extend_from_slice(dir_name);
+        let cd_size = z.len() as u32 - cd_offset;
+        z.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        z.extend_from_slice(&1u16.to_le_bytes());
+        z.extend_from_slice(&1u16.to_le_bytes());
+        z.extend_from_slice(&cd_size.to_le_bytes());
+        z.extend_from_slice(&cd_offset.to_le_bytes());
+        z.extend_from_slice(&0u16.to_le_bytes());
+        let mut c = Cursor::new(&z);
+        let root = detect_and_parse(&mut c).expect("parse ok");
+        // The "/" entry is skipped; root has no children.
+        assert_eq!(root.children.len(), 0);
+    }
+
+    #[test]
+    fn entry_with_doubled_slash_in_path() {
+        // "foo//bar.txt" — the empty component between // is skipped.
+        let name = b"foo//bar.txt";
+        let zip = make_stored_zip(name, b"data");
+        let mut c = Cursor::new(&zip);
+        let root = detect_and_parse(&mut c).expect("parse ok");
+        // Should resolve to root → foo → bar.txt.
+        assert!(root.find_node("/foo/bar.txt").is_some());
+    }
+
+    // ── write_impl unit tests ─────────────────────────────────────────────────
+
+    #[cfg(feature = "write")]
+    mod write_tests {
+        use super::super::write_impl;
+        use std::io::Cursor;
+
+        #[test]
+        fn crc32_known_vectors() {
+            assert_eq!(write_impl::crc32(b""), 0x0000_0000);
+            assert_eq!(write_impl::crc32(b"123456789"), 0xCBF4_3926);
+        }
+
+        #[test]
+        fn write_stored_single_file_round_trips() {
+            let mut buf = Vec::new();
+            write_impl::write_stored(&mut buf, &[("hello.txt", b"Hello!")]).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = super::detect_and_parse(&mut c).expect("round-trip parse");
+            assert_eq!(root.children.len(), 1);
+            assert_eq!(root.children[0].name, "hello.txt");
+            assert_eq!(root.children[0].size, 6);
+            assert!(root.children[0].file_location.is_some());
+        }
+
+        #[test]
+        fn write_stored_multiple_files_round_trips() {
+            let entries = [("a.txt", b"aaa" as &[u8]), ("b.txt", b"bbbb")];
+            let mut buf = Vec::new();
+            write_impl::write_stored(&mut buf, &entries).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = super::detect_and_parse(&mut c).expect("round-trip parse");
+            assert_eq!(root.children.len(), 2);
+        }
+
+        #[test]
+        fn write_stored_empty_entries_produces_valid_zip() {
+            let mut buf = Vec::new();
+            write_impl::write_stored(&mut buf, &[]).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = super::detect_and_parse(&mut c).expect("empty zip parse");
+            assert_eq!(root.children.len(), 0);
+        }
+
+        #[test]
+        fn write_stored_nested_path_round_trips() {
+            let mut buf = Vec::new();
+            write_impl::write_stored(&mut buf, &[("docs/readme.txt", b"readme")]).unwrap();
+            let mut c = Cursor::new(&buf);
+            let root = super::detect_and_parse(&mut c).expect("nested parse");
+            assert!(root.find_node("/docs/readme.txt").is_some());
+        }
+    }
 }
