@@ -143,6 +143,12 @@ jobs:
             mtools \
             sevenzip || true
 
+      # brew install can reorder PATH and shadow the dtolnay-managed cargo with
+      # a rustup-init stub. Re-prepend ~/.cargo/bin so cargo is always ours.
+      - name: Reinstate Rust toolchain PATH
+        if: runner.os == 'macOS'
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Build round-trip tests
         run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar,write --tests
       - name: Run round-trip tests (Ubuntu strict)
