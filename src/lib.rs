@@ -1255,6 +1255,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_node_extracts_file_with_location() {
+        // This test covers the `create_dir_all(parent)?` branch in extract_file_at
+        // (lines 399–401) which is only reached when the node has a file_location.
+        let content = b"hello world";
+        let mut img = vec![0u8; 512];
+        img[..content.len()].copy_from_slice(content);
+        let mut c = std::io::Cursor::new(img);
+
+        let node = TreeNode::new_file_with_location(
+            "synth.txt".to_string(),
+            content.len() as u64,
+            0,
+            content.len() as u64,
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = extract_node(&mut c, &node, tmp.path().to_str().unwrap());
+        assert!(result.is_ok(), "extract_node should succeed: {:?}", result);
+
+        let extracted = std::fs::read(tmp.path().join("synth.txt")).unwrap();
+        assert_eq!(extracted, content);
+    }
+
+    #[test]
     fn cat_node_non_broken_pipe_error_propagates() {
         // A writer that returns a non-BrokenPipe error should propagate the error.
         struct FailWriter;

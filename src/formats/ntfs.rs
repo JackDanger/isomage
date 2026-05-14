@@ -1226,6 +1226,114 @@ mod tests {
         );
     }
 
+    // ── From<io::Error> conversion ────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io_err = std::io::Error::other("disk error");
+        let err: Error = Error::from(io_err);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── parse_boot_sector extra error paths ───────────────────────────────────
+
+    #[test]
+    fn parse_boot_sector_bad_mft_record_size() {
+        // cpfrs = -17 → mft_record_size = 1 << 17 = 131072, which exceeds 65536.
+        let mut data = make_ntfs_boot_sector();
+        data[64] = (-17i8) as u8; // clusters_per_FRS override
+        assert!(matches!(
+            parse_boot_sector(&data),
+            Err(Error::BadClusterSize)
+        ));
+    }
+
+    // ── apply_fixup edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn apply_fixup_buf_too_short() {
+        let mut buf = [0u8; 4]; // less than 8 bytes
+        assert!(!apply_fixup(&mut buf), "short buffer should return false");
+    }
+
+    #[test]
+    fn apply_fixup_usa_count_too_small() {
+        // usa_count < 2 → return false.
+        let mut buf = vec![0u8; 64];
+        // usa_offset = 0, usa_count = 1 → fails the `usa_count < 2` check.
+        buf[4] = 0; // usa_offset low byte
+        buf[5] = 0; // usa_offset high byte
+        buf[6] = 1; // usa_count low byte
+        buf[7] = 0; // usa_count high byte
+        assert!(!apply_fixup(&mut buf));
+    }
+
+    #[test]
+    fn apply_fixup_short_buf_breaks_sector_loop() {
+        // usa_offset=0, usa_count=2 → 1 fix-up entry at sector boundary 510.
+        // Buffer is only 12 bytes, so the loop's `sector_end + 2 > buf.len()` break
+        // triggers on the very first iteration (sector_end = 510 > 12).
+        let mut buf = vec![0u8; 12];
+        buf[4] = 0; // usa_offset
+        buf[5] = 0;
+        buf[6] = 2; // usa_count = 2 (USN + 1 fix-up)
+        buf[7] = 0;
+        // This should return true (fixup "applied", just no sector boundaries to fix).
+        assert!(apply_fixup(&mut buf));
+    }
+
+    // ── parse_attributes edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn parse_attributes_buf_too_short_for_offset() {
+        // buf.len() < 22 → get(20..22) returns None → early return.
+        let buf = [0u8; 10];
+        let attrs = parse_attributes(&buf);
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn parse_attributes_pos_exceeds_buf() {
+        // attr_offset set beyond buf.len() → pos + 8 > buf.len() on first loop.
+        let mut buf = vec![0u8; 30];
+        // attr_offset at bytes 20..22, set to 25 so pos = 25, pos+8 = 33 > 30.
+        buf[20] = 25;
+        buf[21] = 0;
+        let attrs = parse_attributes(&buf);
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn parse_attributes_zero_length_attr_breaks() {
+        // Length field = 0 → break immediately.
+        let mut buf = vec![0u8; 40];
+        // attr_offset = 22
+        buf[20] = 22;
+        buf[21] = 0;
+        // attr_type at pos=22: 0x00000001 (not ATTR_END = 0xFFFFFFFF)
+        buf[22] = 1;
+        // length at pos+4..+8 = 0 → triggers `length == 0` break.
+        // (all zero by default)
+        let attrs = parse_attributes(&buf);
+        assert!(attrs.is_empty());
+    }
+
+    // ── parse_filename_attr edge cases ────────────────────────────────────────
+
+    #[test]
+    fn parse_filename_attr_too_short() {
+        let data = [0u8; 10]; // less than 66 bytes
+        assert!(parse_filename_attr(&data).is_none());
+    }
+
+    #[test]
+    fn parse_filename_attr_name_overflow() {
+        let mut data = vec![0u8; 70];
+        // filename_length at byte 64: set to 3 → name_bytes_len = 6, but 66+6 = 72 > 70.
+        data[64] = 3;
+        assert!(parse_filename_attr(&data).is_none());
+    }
+
     #[test]
     fn parse_minimal_image_file_location_and_contents() {
         let img = make_minimal_ntfs_image();

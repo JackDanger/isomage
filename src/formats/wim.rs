@@ -742,4 +742,79 @@ mod tests {
         assert!(Error::Compressed.source().is_none());
         assert!(Error::BadEncoding.source().is_none());
     }
+
+    // ── From<io::Error> conversion ────────────────────────────────────────────
+
+    #[test]
+    fn error_from_io_error() {
+        let io_err = io::Error::other("disk error");
+        let err: Error = Error::from(io_err);
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    // ── utf16le_to_string edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn utf16le_to_string_odd_byte_count_returns_error() {
+        let odd = vec![0x41u8, 0x00, 0x42]; // 3 bytes — not a multiple of 2
+        assert!(matches!(utf16le_to_string(&odd), Err(Error::BadEncoding)));
+    }
+
+    // ── parse_attr_u32 edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_attr_u32_single_quotes() {
+        let text = "INDEX='3'";
+        assert_eq!(parse_attr_u32(text, "INDEX"), Some(3));
+    }
+
+    #[test]
+    fn parse_attr_u32_no_quote_returns_none() {
+        let text = "INDEX=3"; // no surrounding quotes
+        assert_eq!(parse_attr_u32(text, "INDEX"), None);
+    }
+
+    // ── parse_xml edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_xml_missing_close_image_tag() {
+        // <IMAGE ...> with no </IMAGE> → parse_xml should return empty.
+        let xml = r#"<WIM><IMAGE INDEX="1"><NAME>Orphan</NAME></WIM>"#;
+        let entries = parse_xml(xml);
+        assert!(
+            entries.is_empty(),
+            "unclosed IMAGE tag should yield no entries"
+        );
+    }
+
+    // ── read_header edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn read_header_too_short_returns_too_short() {
+        // A 10-byte buffer: read_exact will get UnexpectedEof.
+        let data = vec![0u8; 10];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::TooShort)));
+    }
+
+    #[test]
+    fn read_header_wrong_magic_returns_bad_magic() {
+        // Buffer is exactly HEADER_SIZE bytes but magic bytes are all zeros.
+        let data = vec![0u8; HEADER_SIZE];
+        let mut c = Cursor::new(data);
+        assert!(matches!(read_header(&mut c), Err(Error::BadMagic)));
+    }
+
+    // ── detect_and_parse xml size guard ──────────────────────────────────────
+
+    #[test]
+    fn detect_and_parse_xml_original_size_exceeds_max() {
+        // Build a WIM whose xml_data.original_size is absurdly large.
+        let mut wim = build_wim(1, "<WIM></WIM>");
+        // original_size is at bytes 88..96 of the header (CBOriginal in RESHDR).
+        let huge: u64 = 128 * 1024 * 1024; // 128 MiB > MAX_XML_SIZE (64 MiB)
+        wim[88..96].copy_from_slice(&huge.to_le_bytes());
+        let mut c = Cursor::new(wim);
+        assert!(matches!(detect_and_parse(&mut c), Err(Error::TooShort)));
+    }
 }
