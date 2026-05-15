@@ -147,7 +147,13 @@ jobs:
       # a rustup-init stub. Re-prepend ~/.cargo/bin so cargo is always ours.
       - name: Reinstate Rust toolchain PATH
         if: runner.os == 'macOS'
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        run: |
+          # brew update can install/upgrade Homebrew's rustup formula, which
+          # puts cargo/rustc shims in $(brew --prefix)/bin that shadow the
+          # dtolnay-managed toolchain.  Remove those shims first, then
+          # prepend the real ~/.cargo/bin so subsequent steps see the right cargo.
+          brew unlink rustup 2>/dev/null || true
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build round-trip tests
         run: cargo test --no-run --features mmap,simd,raw,mbr,gpt,fat,ext,squashfs,vhd,vmdk,qcow2,ntfs,hfsplus,wim,dmg,apfs,zip,tar,write --tests
